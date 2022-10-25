@@ -1,13 +1,15 @@
 use std::{
+    borrow::BorrowMut,
     collections::HashMap,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
     panic::panic_any,
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::{channel, Receiver, Sender},
     time::{Duration, Instant},
 };
 
 use bincode::Options;
+use messages::ClientId;
 use mio::{Events, Interest, Poll, Token};
 use serde::{Deserialize, Serialize};
 
@@ -19,25 +21,26 @@ pub struct Config {
     pub f: usize,
 }
 
-pub struct Transport<T: ?Sized> {
+pub struct Transport<R: ?Sized> {
     pool: WorkerPool,
     reaction_id: u32,
-    reactions: HashMap<u32, Box<dyn FnOnce(&mut T)>>,
+    reactions: HashMap<u32, Box<dyn FnOnce(&mut R)>>,
     timeouts: HashMap<u32, TransportTimeout>,
+    local_addr: SocketAddr,
 }
 struct TransportTimeout {
     delay: Duration,
     deadline: Instant,
 }
 
-impl<T> Transport<T> {
+impl<R> Transport<R> {
     pub fn create_timeout(
         &mut self,
         delay: Duration,
-        reaction: impl FnOnce(&mut T) + 'static,
+        reaction: impl FnOnce(&mut R) + 'static,
     ) -> u32
     where
-        T: TransportReceiver,
+        R: AsMut<Transport<R>>,
     {
         self.reaction_id += 1;
         let id = self.reaction_id;
@@ -81,6 +84,10 @@ impl<T> Transport<T> {
             .map(|(&id, timeout)| (timeout.deadline, id))
             .min()
             .unwrap_or((Instant::now() + Duration::from_secs(600), u32::MAX))
+    }
+
+    pub fn client_id(&self) -> ClientId {
+        ClientId::likely_unique(self.local_addr)
     }
 }
 
@@ -146,22 +153,36 @@ struct ReceiverData<M> {
     wake_reaction: u32,
 }
 
-pub trait TransportReceiver
-where
-    Self: AsMut<Transport<Self>>,
-{
+impl<M> TransportRuntime<M> {
+    pub fn new(config: Config) -> Self {
+        let (back_sender, back_channel) = channel();
+        Self {
+            receivers: Vec::new(),
+            wake_deadline: Instant::now() + Duration::from_secs(600),
+            wake_transport: usize::MAX,
+            wake_reaction: u32::MAX,
+            config,
+            poll: Poll::new().unwrap(),
+            back_channel,
+            back_sender,
+        }
+    }
+}
+
+pub trait TransportReceiver {
     fn receive_message(&mut self, message: &[u8]);
 }
 
 impl<M> TransportRuntime<M> {
-    pub fn create_transport<T>(
+    pub fn create_transport<T, R>(
         &mut self,
         addr: SocketAddr,
         replica_id: u8,
         receiver_mut: impl Fn(&mut M) -> &mut T + 'static + Clone,
-    ) -> Transport<T>
+    ) -> Transport<R>
     where
-        T: TransportReceiver,
+        T: TransportReceiver + BorrowMut<R>,
+        R: AsMut<Transport<R>>,
     {
         let id = self.receivers.len();
         let socket = UdpSocket::bind(addr).unwrap();
@@ -186,22 +207,31 @@ impl<M> TransportRuntime<M> {
             back_channel: self.back_sender.clone(),
         };
 
+        let local_addr = socket.local_addr().unwrap();
+
         self.receivers.push(ReceiverData {
             receive_message: Box::new({
                 let receiver_mut = receiver_mut.clone();
                 move |context, message| {
                     receiver_mut(context).receive_message(message);
-                    receiver_mut(context).as_mut().earliest_timeout()
+                    receiver_mut(context)
+                        .borrow_mut()
+                        .as_mut()
+                        .earliest_timeout()
                 }
             }),
             execute_reaction: Box::new(move |context, reaction_id| {
                 let reaction = receiver_mut(context)
+                    .borrow_mut()
                     .as_mut()
                     .reactions
                     .remove(&reaction_id)
                     .unwrap();
-                reaction(receiver_mut(context));
-                receiver_mut(context).as_mut().earliest_timeout()
+                reaction(receiver_mut(context).borrow_mut());
+                receiver_mut(context)
+                    .borrow_mut()
+                    .as_mut()
+                    .earliest_timeout()
             }),
             wake_deadline: Instant::now() + Duration::from_secs(600),
             wake_reaction: u32::MAX,
@@ -213,6 +243,7 @@ impl<M> TransportRuntime<M> {
             reactions: HashMap::new(),
             timeouts: HashMap::new(),
             pool: WorkerPool::Inline(worker),
+            local_addr,
         }
     }
 

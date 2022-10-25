@@ -33,6 +33,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "messages"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+]
+
+[[package]]
 name = "mio"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +106,7 @@ name = "tidyup"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "messages",
  "mio",
  "serde",
 ]
