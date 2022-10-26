@@ -4,9 +4,9 @@ use std::{
     net::{IpAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicU32, Ordering},
-        Arc,
+        Arc, Barrier,
     },
-    thread::sleep,
+    thread::{sleep, spawn},
     time::Duration,
 };
 
@@ -54,6 +54,7 @@ enum ReplicaMode {
 struct ClientCommand {
     mode: ClientMode,
     n: usize,
+    n_transport: usize,
     ip: IpAddr,
 }
 
@@ -92,7 +93,8 @@ fn main() {
         command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
-            n: 80,
+            n: 10,
+            n_transport: 4,
             ip: [10, 0, 0, 2].into(),
         });
         TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
@@ -102,18 +104,42 @@ fn main() {
         return;
     }
 
-    let mut cpu_set = CpuSet::new();
-    cpu_set.set(0).unwrap();
-    sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
-
     let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
     println!("Listen on {:?}", socket.local_addr().unwrap());
     let command = bincode::options()
         .deserialize_from::<_, Command>(socket.accept().unwrap().0)
         .unwrap();
     match (command.replica, command.client) {
-        (Some(replica), None) => run_replica(replica, command.config, command.app),
-        (None, Some(client)) => run_client(client, command.config, command.app),
+        (Some(replica), None) => {
+            let mut cpu_set = CpuSet::new();
+            cpu_set.set(0).unwrap();
+            sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
+
+            run_replica(replica, command.config, command.app)
+        }
+        (None, Some(client)) => {
+            let n_complete = Arc::new(AtomicU32::new(0));
+            let barrier = Arc::new(Barrier::new(client.n_transport));
+            let handles = (0..client.n_transport)
+                .map(|i| {
+                    let client = client.clone();
+                    let config = command.config.clone();
+                    let app = command.app.clone();
+                    let n_complete = n_complete.clone();
+                    let barrier = barrier.clone();
+                    spawn(move || {
+                        let mut cpu_set = CpuSet::new();
+                        cpu_set.set(i).unwrap();
+                        sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
+
+                        run_client(client, config, app, n_complete, barrier);
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -191,7 +217,13 @@ impl LoopClient {
     }
 }
 
-fn run_client(command: ClientCommand, config: Config, app: AppMode) {
+fn run_client(
+    command: ClientCommand,
+    config: Config,
+    app: AppMode,
+    n_complete: Arc<AtomicU32>,
+    barrier: Arc<Barrier>,
+) {
     struct Context {
         clients: Vec<LoopClient>,
         n_complete: Arc<AtomicU32>,
@@ -199,21 +231,6 @@ fn run_client(command: ClientCommand, config: Config, app: AppMode) {
     }
 
     let mut runtime = TransportRuntime::new(config);
-    fn on_report(context: &mut Context, runtime: &mut TransportRuntime<Context>) {
-        println!(
-            "Interval throughput {} ops/sec",
-            context.n_complete.swap(0, Ordering::SeqCst)
-        );
-        context.n_reported += 1;
-        if context.n_reported == 10 {
-            todo!()
-        } else {
-            runtime.create_timeout(Duration::from_secs(1), on_report);
-        }
-    }
-    runtime.create_timeout(Duration::from_secs(1), on_report);
-
-    let n_complete = Arc::new(AtomicU32::new(0));
     let mut clients = Vec::new();
     for i in 0..command.n {
         let client = Client::new(&command, &mut runtime, move |context: &mut Context| {
@@ -233,6 +250,22 @@ fn run_client(command: ClientCommand, config: Config, app: AppMode) {
         n_complete,
         n_reported: 0,
     };
+
+    fn on_report(context: &mut Context, runtime: &mut TransportRuntime<Context>) {
+        println!(
+            "Interval throughput {} ops/sec",
+            context.n_complete.swap(0, Ordering::SeqCst)
+        );
+        context.n_reported += 1;
+        if context.n_reported == 10 {
+            todo!()
+        } else {
+            runtime.create_timeout(Duration::from_secs(1), on_report);
+        }
+    }
+    if barrier.wait().is_leader() {
+        runtime.create_timeout(Duration::from_secs(1), on_report);
+    }
     runtime.run(&mut context);
 }
 
