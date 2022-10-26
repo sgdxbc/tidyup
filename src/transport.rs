@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
+    os::unix::prelude::{AsRawFd, RawFd},
     panic::panic_any,
     sync::mpsc::{channel, Receiver, Sender},
     time::{Duration, Instant},
@@ -9,7 +10,7 @@ use std::{
 
 use bincode::Options;
 use messages::ClientId;
-use mio::{Events, Interest, Poll, Token};
+use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +22,6 @@ pub struct Config {
 }
 
 pub struct Transport<R: ?Sized> {
-    id: usize,
     pool: WorkerPool,
     reaction_id: u32,
     reactions: HashMap<u32, Box<dyn FnOnce(&mut R)>>,
@@ -136,9 +136,10 @@ pub struct TransportRuntime<M> {
     wake_deadline: Instant,
     wake_transport: usize,
     wake_reaction: u32,
+    context_timeouts: Vec<(Instant, Box<dyn FnOnce(&mut M, &mut Self)>)>,
 
     config: Config,
-    poll: Poll,
+    poll: RawFd,
 
     back_channel: Receiver<(usize, u32)>,
     back_sender: Sender<(usize, u32)>,
@@ -161,8 +162,9 @@ impl<M> TransportRuntime<M> {
             wake_deadline: Instant::now() + Duration::from_secs(600),
             wake_transport: usize::MAX,
             wake_reaction: u32::MAX,
+            context_timeouts: Vec::new(),
             config,
-            poll: Poll::new().unwrap(),
+            poll: epoll_create().unwrap(),
             back_channel,
             back_sender,
         }
@@ -201,14 +203,13 @@ impl<M> TransportRuntime<M> {
         let socket = UdpSocket::bind(addr).unwrap();
         socket.set_nonblocking(true).unwrap();
 
-        self.poll
-            .registry()
-            .register(
-                &mut mio::net::UdpSocket::from_std(socket.try_clone().unwrap()),
-                Token(id),
-                Interest::READABLE,
-            )
-            .unwrap();
+        epoll_ctl(
+            self.poll,
+            EpollOp::EpollCtlAdd,
+            socket.as_raw_fd(),
+            &mut EpollEvent::new(EpollFlags::EPOLLET | EpollFlags::EPOLLIN, id as _),
+        )
+        .unwrap();
 
         let worker = Worker {
             id,
@@ -253,7 +254,6 @@ impl<M> TransportRuntime<M> {
         });
 
         Transport {
-            id,
             reaction_id: 0,
             reactions: HashMap::new(),
             timeouts: HashMap::new(),
@@ -279,45 +279,55 @@ impl<M> TransportRuntime<M> {
             return;
         }
 
-        if let Some((deadline, id, reaction)) = self
-            .receivers
+        self.update_wake_internal();
+    }
+
+    fn update_wake_internal(&mut self) {
+        self.receivers
             .iter()
             .enumerate()
             .map(|(id, peer)| (peer.wake_deadline, id, peer.wake_reaction))
+            .chain(
+                self.context_timeouts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(deadline, _))| (deadline, usize::MAX, i as _)),
+            )
             .min()
-        {
-            self.wake_deadline = deadline;
-            self.wake_transport = id;
-            self.wake_reaction = reaction;
-        }
+            .map(|(deadline, id, reaction)| {
+                self.wake_deadline = deadline;
+                self.wake_transport = id;
+                self.wake_reaction = reaction;
+            });
     }
 
-    pub fn create_timeout<R>(
+    pub fn create_timeout(
         &mut self,
-        transport: &mut Transport<R>,
         delay: Duration,
-        reaction: impl FnOnce(&mut R) + 'static,
-    ) -> u32
-    where
-        R: AsMut<Transport<R>>,
-    {
-        let timeout = transport.create_timeout(delay, reaction);
-        self.update_wake(transport.id, transport.earliest_timeout());
-        timeout
+        reaction: impl FnOnce(&mut M, &mut Self) + 'static,
+    ) {
+        self.context_timeouts
+            .push((Instant::now() + delay, Box::new(reaction)));
+        self.update_wake_internal();
     }
 
     pub fn run(&mut self, context: &mut M) {
         let mut buffer = [0; (u16::MAX - 20 - 8) as _];
-        let mut events = Events::with_capacity(64);
+        let mut event_buffer = [EpollEvent::empty(); 64];
+        let mut events: &[EpollEvent] = &[];
         loop {
             while Instant::now() >= self.wake_deadline {
-                assert_ne!(self.wake_transport, usize::MAX);
-                assert_ne!(self.receivers[self.wake_transport].wake_reaction, u32::MAX);
-                let earliest_timeout = (self.receivers[self.wake_transport].execute_reaction)(
-                    context,
-                    self.wake_reaction,
-                );
-                self.update_wake(self.wake_transport, earliest_timeout);
+                if self.wake_transport == usize::MAX {
+                    self.context_timeouts.swap_remove(self.wake_reaction as _).1(context, self);
+                    self.update_wake_internal();
+                } else {
+                    assert_ne!(self.receivers[self.wake_transport].wake_reaction, u32::MAX);
+                    let earliest_timeout = (self.receivers[self.wake_transport].execute_reaction)(
+                        context,
+                        self.wake_reaction,
+                    );
+                    self.update_wake(self.wake_transport, earliest_timeout);
+                }
             }
 
             while let Ok((id, reaction_id)) = self.back_channel.try_recv() {
@@ -325,22 +335,27 @@ impl<M> TransportRuntime<M> {
                 self.update_wake(id, earliest_timeout);
             }
 
-            // TODO prioritize timeout and triggered action
-            self.poll.poll(&mut events, Some(Duration::ZERO)).unwrap();
-            for event in events.iter() {
-                let Token(id) = event.token();
-                assert!(event.is_readable());
-                loop {
-                    match self.receivers[id].socket.recv_from(&mut buffer) {
-                        Ok((len, _remote)) => {
-                            let earliest_timeout =
-                                (self.receivers[id].receive_message)(context, &buffer[..len]);
-                            self.update_wake(id, earliest_timeout);
-                        }
-                        Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-                        err => panic_any(err),
-                    }
+            if events == &[] {
+                let len = epoll_wait(self.poll, &mut event_buffer, 0).unwrap();
+                events = &event_buffer[..len];
+            }
+            let event = if let Some(event) = events.first() {
+                event
+            } else {
+                continue;
+            };
+            assert!(event.events().contains(EpollFlags::EPOLLIN));
+            let id = event.data() as usize;
+            match self.receivers[id].socket.recv_from(&mut buffer) {
+                Ok((len, _remote)) => {
+                    let earliest_timeout =
+                        (self.receivers[id].receive_message)(context, &buffer[..len]);
+                    self.update_wake(id, earliest_timeout);
                 }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    events = &events[1..];
+                }
+                err => panic_any(err),
             }
         }
     }

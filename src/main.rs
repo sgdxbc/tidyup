@@ -12,11 +12,15 @@ use std::{
 
 use bincode::Options;
 use messages::ReplicaId;
+use nix::{
+    sched::{sched_setaffinity, CpuSet},
+    unistd::Pid,
+};
 use serde::{Deserialize, Serialize};
 use tidyup::{
     app::{self, App},
-    client::{self, LoopClient as _},
-    transport::{Config, ReactorMut, Transport, TransportReceiver, TransportRuntime},
+    client,
+    transport::{Config, ReactorMut, TransportReceiver, TransportRuntime},
     unreplicated,
 };
 
@@ -88,7 +92,7 @@ fn main() {
         command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
-            n: 50,
+            n: 80,
             ip: [10, 0, 0, 2].into(),
         });
         TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
@@ -97,6 +101,10 @@ fn main() {
             .unwrap();
         return;
     }
+
+    let mut cpu_set = CpuSet::new();
+    cpu_set.set(0).unwrap();
+    sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
 
     let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
     println!("Listen on {:?}", socket.local_addr().unwrap());
@@ -157,7 +165,8 @@ impl Client {
     ) -> Self {
         match command.mode {
             ClientMode::Unreplicated => {
-                let transport = LoopClient::create_transport(runtime, command.ip, loop_mut);
+                let transport =
+                    runtime.create_transport((command.ip, 0).into(), ReplicaId::MAX, loop_mut);
                 Self::Unreplicated(unreplicated::Client::new(transport))
             }
         }
@@ -174,60 +183,37 @@ impl LoopClient {
             AppMode::Null => Self::Null(client::Null::new(client, n_complete)),
         }
     }
-}
 
-struct Monitor {
-    transport: Transport<Self>,
-    n_complete: Arc<AtomicU32>,
-    n_reported: u32,
-}
-
-impl AsMut<Transport<Self>> for Monitor {
-    fn as_mut(&mut self) -> &mut Transport<Self> {
-        &mut self.transport
-    }
-}
-
-impl TransportReceiver for Monitor {
-    fn receive_message(&mut self, _message: &[u8]) {
-        unreachable!()
+    fn initiate(&mut self) {
+        match self {
+            Self::Null(client) => client.initiate(),
+        }
     }
 }
 
 fn run_client(command: ClientCommand, config: Config, app: AppMode) {
     struct Context {
         clients: Vec<LoopClient>,
-        monitor: Monitor,
+        n_complete: Arc<AtomicU32>,
+        n_reported: u32,
     }
 
     let mut runtime = TransportRuntime::new(config);
-    let mut transport = runtime.create_transport(
-        (command.ip, 0).into(),
-        ReplicaId::MAX,
-        |context: &mut Context| &mut context.monitor,
-    );
-    fn on_report(monitor: &mut Monitor) {
+    fn on_report(context: &mut Context, runtime: &mut TransportRuntime<Context>) {
         println!(
             "Interval throughput {} ops/sec",
-            monitor.n_complete.swap(0, Ordering::SeqCst)
+            context.n_complete.swap(0, Ordering::SeqCst)
         );
-        monitor.n_reported += 1;
-        if monitor.n_reported == 10 {
+        context.n_reported += 1;
+        if context.n_reported == 10 {
             todo!()
         } else {
-            monitor
-                .transport
-                .create_timeout(Duration::from_secs(1), on_report);
+            runtime.create_timeout(Duration::from_secs(1), on_report);
         }
     }
-    runtime.create_timeout(&mut transport, Duration::from_secs(1), on_report);
-    let n_complete = Arc::new(AtomicU32::new(0));
-    let monitor = Monitor {
-        transport,
-        n_complete: n_complete.clone(),
-        n_reported: 0,
-    };
+    runtime.create_timeout(Duration::from_secs(1), on_report);
 
+    let n_complete = Arc::new(AtomicU32::new(0));
     let mut clients = Vec::new();
     for i in 0..command.n {
         let client = Client::new(&command, &mut runtime, move |context: &mut Context| {
@@ -236,7 +222,17 @@ fn run_client(command: ClientCommand, config: Config, app: AppMode) {
         clients.push(LoopClient::new(&app, client, n_complete.clone()));
     }
 
-    let mut context = Context { clients, monitor };
+    runtime.create_timeout(Duration::ZERO, |context, _| {
+        for client in &mut context.clients {
+            client.initiate();
+        }
+    });
+
+    let mut context = Context {
+        clients,
+        n_complete,
+        n_reported: 0,
+    };
     runtime.run(&mut context);
 }
 
@@ -314,5 +310,3 @@ impl TransportReceiver for LoopClient {
         }
     }
 }
-
-impl tidyup::client::LoopClient for LoopClient {}

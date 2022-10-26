@@ -9,5 +9,5 @@ members = ["src/messages"]
 [dependencies]
 bincode = "1.3.3"
 messages = { version = "0.1.0", path = "src/messages" }
-mio = { version = "0.8.4", features = ["os-poll", "net"] }
+nix = "0.25.0"
 serde = { version = "1.0.147", features = ["derive"] }

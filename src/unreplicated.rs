@@ -91,6 +91,7 @@ pub struct Replica {
     app: Box<dyn App>,
     op_number: OpNumber,
     cache: HashMap<ClientId, Reply>,
+    pub log: Vec<Request>,
 }
 
 impl AsMut<Transport<Self>> for Replica {
@@ -106,6 +107,7 @@ impl Replica {
             app,
             op_number: 0,
             cache: HashMap::new(),
+            log: Vec::new(),
         }
     }
 }
@@ -134,7 +136,9 @@ impl Replica {
             }
         }
 
+        self.log.push(request.clone());
         self.op_number += 1;
+        assert_eq!(self.log.len() as OpNumber, self.op_number);
         let result = self.app.execute(self.op_number, &request.op);
         let message = Reply {
             request_number: request.request_number,

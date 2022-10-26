@@ -1,5 +1,4 @@
 use std::{
-    net::IpAddr,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -7,34 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use messages::ReplicaId;
-
-use crate::transport::{ReactorMut, Transport, TransportReceiver, TransportRuntime};
+use crate::transport::{ReactorMut, TransportReceiver};
 
 pub trait Client {
     fn invoke(&mut self, op: Box<[u8]>);
     fn take_result(&mut self) -> Option<Box<[u8]>>;
-}
-
-pub trait LoopClient {
-    fn create_transport<M, R>(
-        runtime: &mut TransportRuntime<M>,
-        addr: impl Into<IpAddr>,
-        self_mut: impl Fn(&mut M) -> &mut Self + 'static + Clone,
-    ) -> Transport<R>
-    where
-        Self: TransportReceiver + ReactorMut<R> + Sized,
-        R: AsMut<Transport<R>> + Client,
-    {
-        let mut transport =
-            runtime.create_transport((addr.into(), 0).into(), ReplicaId::MAX, move |container| {
-                self_mut(container)
-            });
-        runtime.create_timeout(&mut transport, Duration::ZERO, |receiver| {
-            receiver.invoke(Box::new([]))
-        });
-        transport
-    }
 }
 
 pub struct Null<T> {
@@ -52,6 +28,13 @@ impl<T> Null<T> {
             invoke_instant: Instant::now(),
             latencies: Vec::new(),
         }
+    }
+
+    pub fn initiate(&mut self)
+    where
+        T: Client,
+    {
+        self.receiver.invoke(Box::new([]));
     }
 }
 
@@ -80,5 +63,3 @@ where
         }
     }
 }
-
-impl<T> LoopClient for Null<T> where T: TransportReceiver + Client + 'static {}
