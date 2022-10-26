@@ -1,5 +1,3 @@
-use bincode::Options;
-
 pub mod unreplicated;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -21,14 +19,4 @@ impl ClientId {
                 .to_le_bytes()[0],
         )
     }
-}
-
-pub fn deserialize<M>(message: &[u8]) -> M
-where
-    M: serde::de::DeserializeOwned,
-{
-    bincode::options()
-        .allow_trailing_bytes()
-        .deserialize(message)
-        .unwrap()
 }

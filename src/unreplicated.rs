@@ -1,14 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
 use messages::{
-    deserialize,
     unreplicated::{Reply, Request},
     ClientId, OpNumber, RequestNumber,
 };
 
 use crate::{
     app::App,
-    transport::{Transport, TransportReceiver},
+    transport::{deserialize, Transport, TransportReceiver},
 };
 
 pub struct Client {
@@ -54,6 +53,7 @@ impl crate::client::Client for Client {
 
 impl Client {
     fn do_request(&mut self) {
+        assert!(self.result.is_none());
         let message = Request {
             client_id: self.id,
             request_number: self.request_number,
@@ -61,7 +61,8 @@ impl Client {
         };
         self.transport
             .work(move |worker| worker.send_message_to_replica(0, message));
-        self.transport
+        self.timeout = self
+            .transport
             .create_timeout(Duration::from_secs(1), |self_| {
                 //
                 self_.do_request();

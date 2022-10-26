@@ -11,7 +11,7 @@ use std::{
 use bincode::Options;
 use messages::ClientId;
 use mio::{Events, Interest, Poll, Token};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -22,6 +22,7 @@ pub struct Config {
 }
 
 pub struct Transport<R: ?Sized> {
+    id: usize,
     pool: WorkerPool,
     reaction_id: u32,
     reactions: HashMap<u32, Box<dyn FnOnce(&mut R)>>,
@@ -202,7 +203,8 @@ impl<M> TransportRuntime<M> {
             local: replica_id as _,
             remotes: self.config.remotes.clone(),
             public_keys: self.config.public_keys.clone(),
-            secret_key: self.config.secret_keys[replica_id as usize], // TODO
+            // secret_key: self.config.secret_keys[replica_id as usize], // TODO
+            secret_key: (),
             socket: socket.try_clone().unwrap(),
             back_channel: self.back_sender.clone(),
         };
@@ -239,6 +241,7 @@ impl<M> TransportRuntime<M> {
         });
 
         Transport {
+            id,
             reaction_id: 0,
             reactions: HashMap::new(),
             timeouts: HashMap::new(),
@@ -271,15 +274,28 @@ impl<M> TransportRuntime<M> {
             .map(|(id, peer)| (peer.wake_deadline, id, peer.wake_reaction))
             .min()
         {
-            assert!(deadline <= self.wake_deadline);
             self.wake_deadline = deadline;
             self.wake_transport = id;
             self.wake_reaction = reaction;
         }
     }
 
+    pub fn create_timeout<R>(
+        &mut self,
+        transport: &mut Transport<R>,
+        delay: Duration,
+        reaction: impl FnOnce(&mut R) + 'static,
+    ) -> u32
+    where
+        R: AsMut<Transport<R>>,
+    {
+        let timeout = transport.create_timeout(delay, reaction);
+        self.update_wake(transport.id, transport.earliest_timeout());
+        timeout
+    }
+
     pub fn run(&mut self, context: &mut M) {
-        let mut buffer = [0; (64 << 20) - 20 - 8];
+        let mut buffer = [0; (u16::MAX - 20 - 8) as _];
         let mut events = Events::with_capacity(64);
         loop {
             while Instant::now() >= self.wake_deadline {
@@ -303,10 +319,10 @@ impl<M> TransportRuntime<M> {
                 let Token(id) = event.token();
                 assert!(event.is_readable());
                 loop {
-                    let receive_message = &self.receivers[id].receive_message;
                     match self.receivers[id].socket.recv_from(&mut buffer) {
                         Ok((len, _remote)) => {
-                            let earliest_timeout = receive_message(context, &buffer[..len]);
+                            let earliest_timeout =
+                                (self.receivers[id].receive_message)(context, &buffer[..len]);
                             self.update_wake(id, earliest_timeout);
                         }
                         Err(err) if err.kind() == ErrorKind::WouldBlock => break,
@@ -316,4 +332,14 @@ impl<M> TransportRuntime<M> {
             }
         }
     }
+}
+
+pub fn deserialize<M>(message: &[u8]) -> M
+where
+    M: DeserializeOwned,
+{
+    bincode::options()
+        .allow_trailing_bytes()
+        .deserialize(message)
+        .unwrap()
 }

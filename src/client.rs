@@ -28,11 +28,16 @@ where
     ) -> Transport<R>
     where
         T: TransportReceiver + BorrowMut<R>,
-        R: AsMut<Transport<R>>,
+        R: AsMut<Transport<R>> + Client,
     {
-        runtime.create_transport((addr.into(), 0).into(), ReplicaId::MAX, move |container| {
-            self_mut(container).borrow_mut()
-        })
+        let mut transport =
+            runtime.create_transport((addr.into(), 0).into(), ReplicaId::MAX, move |container| {
+                self_mut(container).borrow_mut()
+            });
+        runtime.create_timeout(&mut transport, Duration::ZERO, |receiver| {
+            receiver.invoke(Box::new([]))
+        });
+        transport
     }
 }
 
@@ -73,6 +78,7 @@ where
     fn receive_message(&mut self, message: &[u8]) {
         self.receiver.receive_message(message);
         if let Some(result) = self.receiver.take_result() {
+            println!("get result");
             self.latencies.push(Instant::now() - self.invoke_instant);
             assert_eq!(&*result, &[]);
             self.n_complete.fetch_add(1, Ordering::SeqCst);

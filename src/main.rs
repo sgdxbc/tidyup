@@ -79,18 +79,20 @@ fn main() {
             mode: ReplicaMode::Unreplicated,
             id: 0,
         });
+        command.client = None;
         TcpStream::connect(("nsl-node1.d1.comp.nus.edu.sg", 7000))
             .unwrap()
             .write_all(&bincode::options().serialize(&command).unwrap())
             .unwrap();
 
         sleep(Duration::from_secs(1));
+        command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
             n: 1,
-            ip: [10, 0, 0, 5].into(),
+            ip: [10, 0, 0, 2].into(),
         });
-        TcpStream::connect(("nsl-node5.d1.com.nus.edu.sg", 7000))
+        TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
             .unwrap()
             .write_all(&bincode::options().serialize(&command).unwrap())
             .unwrap();
@@ -98,6 +100,7 @@ fn main() {
     }
 
     let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
+    println!("Listen on {:?}", socket.local_addr().unwrap());
     let command = bincode::options()
         .deserialize_from::<_, Command>(socket.accept().unwrap().0)
         .unwrap();
@@ -218,7 +221,7 @@ fn run_client(command: ClientCommand, config: Config, app: AppMode) {
                 .create_timeout(Duration::from_secs(1), on_report);
         }
     }
-    transport.create_timeout(Duration::from_secs(1), on_report);
+    runtime.create_timeout(&mut transport, Duration::from_secs(1), on_report);
     let n_complete = Arc::new(AtomicU32::new(0));
     let monitor = Monitor {
         transport,
