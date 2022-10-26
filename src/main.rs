@@ -1,5 +1,4 @@
 use std::{
-    borrow::{Borrow, BorrowMut},
     env::args,
     io::Write,
     net::{IpAddr, TcpListener, TcpStream},
@@ -17,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tidyup::{
     app::{self, App},
     client::{self, LoopClient as _},
-    transport::{Config, Transport, TransportReceiver, TransportRuntime},
+    transport::{Config, ReactorMut, Transport, TransportReceiver, TransportRuntime},
     unreplicated,
 };
 
@@ -89,7 +88,7 @@ fn main() {
         command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
-            n: 1,
+            n: 50,
             ip: [10, 0, 0, 2].into(),
         });
         TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
@@ -128,7 +127,7 @@ impl Replica {
                 let transport = runtime.create_transport(
                     config.remotes[command.id as usize],
                     command.id,
-                    BorrowMut::<unreplicated::Replica>::borrow_mut,
+                    |self_| self_,
                 );
                 Self::Unreplicated(unreplicated::Replica::new(transport, app))
             }
@@ -252,8 +251,8 @@ impl TransportReceiver for Replica {
     }
 }
 
-impl Borrow<unreplicated::Replica> for Replica {
-    fn borrow(&self) -> &unreplicated::Replica {
+impl ReactorMut<unreplicated::Replica> for Replica {
+    fn reactor_mut(&mut self) -> &mut unreplicated::Replica {
         if let Self::Unreplicated(replica) = self {
             replica
         } else {
@@ -262,18 +261,8 @@ impl Borrow<unreplicated::Replica> for Replica {
     }
 }
 
-impl BorrowMut<unreplicated::Replica> for Replica {
-    fn borrow_mut(&mut self) -> &mut unreplicated::Replica {
-        if let Self::Unreplicated(replica) = self {
-            replica
-        } else {
-            unreachable!()
-        }
-    }
-}
-
-impl Borrow<unreplicated::Client> for Client {
-    fn borrow(&self) -> &unreplicated::Client {
+impl ReactorMut<unreplicated::Client> for Client {
+    fn reactor_mut(&mut self) -> &mut unreplicated::Client {
         if let Self::Unreplicated(client) = self {
             client
         } else {
@@ -282,28 +271,13 @@ impl Borrow<unreplicated::Client> for Client {
     }
 }
 
-impl BorrowMut<unreplicated::Client> for Client {
-    fn borrow_mut(&mut self) -> &mut unreplicated::Client {
-        if let Self::Unreplicated(client) = self {
-            client
-        } else {
-            unreachable!()
-        }
-    }
-}
-
-impl Borrow<Client> for LoopClient {
-    fn borrow(&self) -> &Client {
+impl<T> ReactorMut<T> for LoopClient
+where
+    Client: ReactorMut<T>,
+{
+    fn reactor_mut(&mut self) -> &mut T {
         match self {
-            Self::Null(client) => client.borrow(),
-        }
-    }
-}
-
-impl BorrowMut<Client> for LoopClient {
-    fn borrow_mut(&mut self) -> &mut Client {
-        match self {
-            Self::Null(client) => client.borrow_mut(),
+            Self::Null(client) => client.reactor_mut(),
         }
     }
 }
@@ -341,4 +315,4 @@ impl TransportReceiver for LoopClient {
     }
 }
 
-impl tidyup::client::LoopClient<Client> for LoopClient {}
+impl tidyup::client::LoopClient for LoopClient {}

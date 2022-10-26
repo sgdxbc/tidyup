@@ -1,5 +1,4 @@
 use std::{
-    borrow::{Borrow, BorrowMut},
     net::IpAddr,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -10,29 +9,26 @@ use std::{
 
 use messages::ReplicaId;
 
-use crate::transport::{Transport, TransportReceiver, TransportRuntime};
+use crate::transport::{ReactorMut, Transport, TransportReceiver, TransportRuntime};
 
 pub trait Client {
     fn invoke(&mut self, op: Box<[u8]>);
     fn take_result(&mut self) -> Option<Box<[u8]>>;
 }
 
-pub trait LoopClient<T>
-where
-    Self: TransportReceiver + BorrowMut<T> + 'static,
-{
+pub trait LoopClient {
     fn create_transport<M, R>(
         runtime: &mut TransportRuntime<M>,
         addr: impl Into<IpAddr>,
         self_mut: impl Fn(&mut M) -> &mut Self + 'static + Clone,
     ) -> Transport<R>
     where
-        T: TransportReceiver + BorrowMut<R>,
+        Self: TransportReceiver + ReactorMut<R> + Sized,
         R: AsMut<Transport<R>> + Client,
     {
         let mut transport =
             runtime.create_transport((addr.into(), 0).into(), ReplicaId::MAX, move |container| {
-                self_mut(container).borrow_mut()
+                self_mut(container)
             });
         runtime.create_timeout(&mut transport, Duration::ZERO, |receiver| {
             receiver.invoke(Box::new([]))
@@ -48,18 +44,6 @@ pub struct Null<T> {
     pub latencies: Vec<Duration>,
 }
 
-impl<T> Borrow<T> for Null<T> {
-    fn borrow(&self) -> &T {
-        &self.receiver
-    }
-}
-
-impl<T> BorrowMut<T> for Null<T> {
-    fn borrow_mut(&mut self) -> &mut T {
-        &mut self.receiver
-    }
-}
-
 impl<T> Null<T> {
     pub fn new(receiver: T, n_complete: Arc<AtomicU32>) -> Self {
         Self {
@@ -71,6 +55,15 @@ impl<T> Null<T> {
     }
 }
 
+impl<T, R> ReactorMut<R> for Null<T>
+where
+    T: ReactorMut<R>,
+{
+    fn reactor_mut(&mut self) -> &mut R {
+        self.receiver.reactor_mut()
+    }
+}
+
 impl<T> TransportReceiver for Null<T>
 where
     T: TransportReceiver + Client,
@@ -78,7 +71,6 @@ where
     fn receive_message(&mut self, message: &[u8]) {
         self.receiver.receive_message(message);
         if let Some(result) = self.receiver.take_result() {
-            println!("get result");
             self.latencies.push(Instant::now() - self.invoke_instant);
             assert_eq!(&*result, &[]);
             self.n_complete.fetch_add(1, Ordering::SeqCst);
@@ -89,4 +81,4 @@ where
     }
 }
 
-impl<T> LoopClient<T> for Null<T> where T: TransportReceiver + Client + 'static {}
+impl<T> LoopClient for Null<T> where T: TransportReceiver + Client + 'static {}

@@ -1,5 +1,4 @@
 use std::{
-    borrow::BorrowMut,
     collections::HashMap,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
@@ -148,8 +147,8 @@ struct ReceiverData<M> {
     receive_message: Box<dyn Fn(&mut M, &[u8]) -> (Instant, u32)>,
     execute_reaction: Box<dyn Fn(&mut M, u32) -> (Instant, u32)>,
     socket: UdpSocket,
-    // have to keep a copy here because we need to access every receiver's
-    // earliest timeout even when it is sleeping on slow path
+    // have to keep a copy here because on slow path we need to access every
+    // receiver's earliest timeout even when it is sleeping
     wake_deadline: Instant,
     wake_reaction: u32,
 }
@@ -170,8 +169,21 @@ impl<M> TransportRuntime<M> {
     }
 }
 
+pub trait ReactorMut<Reactor = Self> {
+    fn reactor_mut(&mut self) -> &mut Reactor;
+}
+
 pub trait TransportReceiver {
     fn receive_message(&mut self, message: &[u8]);
+}
+
+impl<R> ReactorMut<Self> for R
+where
+    R: AsMut<Transport<Self>>,
+{
+    fn reactor_mut(&mut self) -> &mut Self {
+        self
+    }
 }
 
 impl<M> TransportRuntime<M> {
@@ -182,7 +194,7 @@ impl<M> TransportRuntime<M> {
         receiver_mut: impl Fn(&mut M) -> &mut T + 'static + Clone,
     ) -> Transport<R>
     where
-        T: TransportReceiver + BorrowMut<R>,
+        T: TransportReceiver + ReactorMut<R>,
         R: AsMut<Transport<R>>,
     {
         let id = self.receivers.len();
@@ -217,21 +229,21 @@ impl<M> TransportRuntime<M> {
                 move |context, message| {
                     receiver_mut(context).receive_message(message);
                     receiver_mut(context)
-                        .borrow_mut()
+                        .reactor_mut()
                         .as_mut()
                         .earliest_timeout()
                 }
             }),
             execute_reaction: Box::new(move |context, reaction_id| {
                 let reaction = receiver_mut(context)
-                    .borrow_mut()
+                    .reactor_mut()
                     .as_mut()
                     .reactions
                     .remove(&reaction_id)
                     .unwrap();
-                reaction(receiver_mut(context).borrow_mut());
+                reaction(receiver_mut(context).reactor_mut());
                 receiver_mut(context)
-                    .borrow_mut()
+                    .reactor_mut()
                     .as_mut()
                     .earliest_timeout()
             }),
