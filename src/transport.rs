@@ -9,9 +9,11 @@ use std::{
 };
 
 use bincode::Options;
-use messages::ClientId;
+use messages::{ClientId, ReplicaId};
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+use crate::worker::{Work, WorkerPool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -22,7 +24,7 @@ pub struct Config {
 }
 
 pub struct Transport<R: ?Sized> {
-    pool: WorkerPool,
+    work: Work,
     reaction_id: u32,
     reactions: HashMap<u32, Box<dyn FnOnce(&mut R)>>,
     timeouts: HashMap<u32, TransportTimeout>,
@@ -71,10 +73,10 @@ impl<R> Transport<R> {
         self.timeouts.remove(&id).unwrap();
     }
 
-    pub fn work(&mut self, task: impl FnOnce(&mut Worker) + 'static) {
-        match &mut self.pool {
-            WorkerPool::Inline(worker) => task(worker),
-            //
+    pub fn work(&mut self, task: impl FnOnce(&mut Worker) + Send + 'static) {
+        match &mut self.work {
+            Work::Inline(worker) => task(worker),
+            Work::Pool(pool) => pool.work(task),
         }
     }
 
@@ -91,10 +93,6 @@ impl<R> Transport<R> {
     }
 }
 
-enum WorkerPool {
-    Inline(Worker),
-}
-
 pub struct Worker {
     id: usize,
     socket: UdpSocket,
@@ -103,6 +101,20 @@ pub struct Worker {
     public_keys: Vec<()>,
     secret_key: (),
     back_channel: Sender<(usize, u32)>,
+}
+
+impl Clone for Worker {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            socket: self.socket.try_clone().unwrap(),
+            local: self.local,
+            remotes: self.remotes.clone(),
+            public_keys: self.public_keys.clone(),
+            secret_key: self.secret_key.clone(),
+            back_channel: self.back_channel.clone(),
+        }
+    }
 }
 
 impl Worker {
@@ -193,6 +205,7 @@ impl<M> TransportRuntime<M> {
         &mut self,
         addr: SocketAddr,
         replica_id: u8,
+        n_worker: usize,
         receiver_mut: impl Fn(&mut M) -> &mut T + 'static + Clone,
     ) -> Transport<R>
     where
@@ -257,7 +270,12 @@ impl<M> TransportRuntime<M> {
             reaction_id: 0,
             reactions: HashMap::new(),
             timeouts: HashMap::new(),
-            pool: WorkerPool::Inline(worker),
+            work: if n_worker == 0 {
+                Work::Inline(worker)
+            } else {
+                assert_ne!(replica_id, ReplicaId::MAX);
+                Work::Pool(WorkerPool::new(n_worker, worker))
+            },
             local_addr,
         }
     }
@@ -283,7 +301,8 @@ impl<M> TransportRuntime<M> {
     }
 
     fn update_wake_internal(&mut self) {
-        self.receivers
+        if let Some((deadline, id, reaction)) = self
+            .receivers
             .iter()
             .enumerate()
             .map(|(id, peer)| (peer.wake_deadline, id, peer.wake_reaction))
@@ -294,11 +313,11 @@ impl<M> TransportRuntime<M> {
                     .map(|(i, &(deadline, _))| (deadline, usize::MAX, i as _)),
             )
             .min()
-            .map(|(deadline, id, reaction)| {
-                self.wake_deadline = deadline;
-                self.wake_transport = id;
-                self.wake_reaction = reaction;
-            });
+        {
+            self.wake_deadline = deadline;
+            self.wake_transport = id;
+            self.wake_reaction = reaction;
+        }
     }
 
     pub fn create_timeout(
@@ -335,7 +354,7 @@ impl<M> TransportRuntime<M> {
                 self.update_wake(id, earliest_timeout);
             }
 
-            if events == &[] {
+            if events == [] {
                 let len = epoll_wait(self.poll, &mut event_buffer, 0).unwrap();
                 events = &event_buffer[..len];
             }

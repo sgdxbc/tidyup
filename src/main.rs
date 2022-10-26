@@ -2,6 +2,7 @@ use std::{
     env::args,
     io::Write,
     net::{IpAddr, TcpListener, TcpStream},
+    process::id,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Barrier,
@@ -42,6 +43,7 @@ enum AppMode {
 struct ReplicaCommand {
     mode: ReplicaMode,
     id: ReplicaId,
+    n_worker: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +84,7 @@ fn main() {
         command.replica = Some(ReplicaCommand {
             mode: ReplicaMode::Unreplicated,
             id: 0,
+            n_worker: 14,
         });
         command.client = None;
         TcpStream::connect(("nsl-node1.d1.comp.nus.edu.sg", 7000))
@@ -93,8 +96,8 @@ fn main() {
         command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
-            n: 10,
-            n_transport: 4,
+            n: 15,
+            n_transport: 8,
             ip: [10, 0, 0, 2].into(),
         });
         TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
@@ -104,8 +107,8 @@ fn main() {
         return;
     }
 
+    println!("Execution ready {}", id());
     let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
-    println!("Listen on {:?}", socket.local_addr().unwrap());
     let command = bincode::options()
         .deserialize_from::<_, Command>(socket.accept().unwrap().0)
         .unwrap();
@@ -124,7 +127,6 @@ fn main() {
                 .map(|i| {
                     let client = client.clone();
                     let config = command.config.clone();
-                    let app = command.app.clone();
                     let n_complete = n_complete.clone();
                     let barrier = barrier.clone();
                     spawn(move || {
@@ -132,7 +134,7 @@ fn main() {
                         cpu_set.set(i).unwrap();
                         sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
 
-                        run_client(client, config, app, n_complete, barrier);
+                        run_client(client, config, command.app, n_complete, barrier);
                     })
                 })
                 .collect::<Vec<_>>();
@@ -161,6 +163,7 @@ impl Replica {
                 let transport = runtime.create_transport(
                     config.remotes[command.id as usize],
                     command.id,
+                    command.n_worker,
                     |self_| self_,
                 );
                 Self::Unreplicated(unreplicated::Replica::new(transport, app))
@@ -192,7 +195,7 @@ impl Client {
         match command.mode {
             ClientMode::Unreplicated => {
                 let transport =
-                    runtime.create_transport((command.ip, 0).into(), ReplicaId::MAX, loop_mut);
+                    runtime.create_transport((command.ip, 0).into(), ReplicaId::MAX, 0, loop_mut);
                 Self::Unreplicated(unreplicated::Client::new(transport))
             }
         }
@@ -257,7 +260,7 @@ fn run_client(
             context.n_complete.swap(0, Ordering::SeqCst)
         );
         context.n_reported += 1;
-        if context.n_reported == 10 {
+        if context.n_reported == 30 {
             todo!()
         } else {
             runtime.create_timeout(Duration::from_secs(1), on_report);
