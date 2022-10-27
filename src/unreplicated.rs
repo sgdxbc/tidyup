@@ -1,13 +1,14 @@
 use std::{collections::HashMap, time::Duration};
 
 use messages::{
+    deserialize,
     unreplicated::{Reply, Request},
     ClientId, OpNumber, RequestNumber,
 };
 
 use crate::{
     app::App,
-    transport::{deserialize, Transport, TransportReceiver},
+    transport::{Transport, TransportReceiver},
 };
 
 pub struct Client {

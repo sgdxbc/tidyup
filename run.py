@@ -24,7 +24,7 @@ async def main():
     client_tasks = [spawn(remote(host, "[C]")) for host in clients]
 
     await sleep(2)
-    p = await proc("./target/release/tidyup", "config")
+    p = await proc("./target/release/tidyup", "command")
     await p.wait()
 
     await gather(*client_tasks)

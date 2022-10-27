@@ -11,8 +11,10 @@ use std::{
     time::Duration,
 };
 
-use bincode::Options;
-use messages::ReplicaId;
+use messages::{
+    crypto::{PublicKey, SecretKey},
+    deserialize_from, serialize, ReplicaId,
+};
 use nix::{
     sched::{sched_setaffinity, CpuSet},
     unistd::Pid,
@@ -67,19 +69,25 @@ enum ClientMode {
 }
 
 fn main() {
-    if args().nth(1).unwrap_or_default() == "config" {
+    if args().nth(1).unwrap_or_default() == "command" {
         //
         let mut command = Command {
             app: AppMode::Null,
             config: Config {
                 remotes: vec![([10, 0, 0, 1], 7001).into()],
                 f: 0,
-                public_keys: vec![()],
-                secret_keys: vec![()],
+                public_keys: Vec::new(),
+                secret_keys: Vec::new(),
             },
             client: None,
             replica: None,
         };
+        for i in 0..command.config.remotes.len() {
+            let secret_key = SecretKey::new_secp256k1(i as ReplicaId);
+            let public_key = PublicKey::new_secp256k1(&secret_key);
+            command.config.public_keys.push(public_key);
+            command.config.secret_keys.push(secret_key);
+        }
 
         command.replica = Some(ReplicaCommand {
             mode: ReplicaMode::Unreplicated,
@@ -89,29 +97,27 @@ fn main() {
         command.client = None;
         TcpStream::connect(("nsl-node1.d1.comp.nus.edu.sg", 7000))
             .unwrap()
-            .write_all(&bincode::options().serialize(&command).unwrap())
+            .write_all(&serialize(&command))
             .unwrap();
 
         sleep(Duration::from_secs(1));
         command.replica = None;
         command.client = Some(ClientCommand {
             mode: ClientMode::Unreplicated,
-            n: 15,
-            n_transport: 8,
+            n: 8,
+            n_transport: 15,
             ip: [10, 0, 0, 2].into(),
         });
         TcpStream::connect(("nsl-node2.d1.comp.nus.edu.sg", 7000))
             .unwrap()
-            .write_all(&bincode::options().serialize(&command).unwrap())
+            .write_all(&serialize(&command))
             .unwrap();
         return;
     }
 
     println!("Execution ready {}", id());
     let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
-    let command = bincode::options()
-        .deserialize_from::<_, Command>(socket.accept().unwrap().0)
-        .unwrap();
+    let command = deserialize_from::<Command>(socket.accept().unwrap().0);
     match (command.replica, command.client) {
         (Some(replica), None) => {
             let mut cpu_set = CpuSet::new();

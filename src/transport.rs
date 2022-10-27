@@ -8,18 +8,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bincode::Options;
-use messages::{ClientId, ReplicaId};
+use messages::{
+    crypto::{PublicKey, SecretKey},
+    serialize, ClientId, ReplicaId,
+};
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::worker::{Work, WorkerPool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub remotes: Vec<SocketAddr>,
-    pub public_keys: Vec<()>,
-    pub secret_keys: Vec<()>,
+    pub public_keys: Vec<PublicKey>,
+    pub secret_keys: Vec<SecretKey>,
     pub f: usize,
 }
 
@@ -29,6 +31,8 @@ pub struct Transport<R: ?Sized> {
     reactions: HashMap<u32, Box<dyn FnOnce(&mut R)>>,
     timeouts: HashMap<u32, TransportTimeout>,
     local_addr: SocketAddr,
+    pub n: usize,
+    pub f: usize,
 }
 struct TransportTimeout {
     delay: Duration,
@@ -98,8 +102,8 @@ pub struct Worker {
     socket: UdpSocket,
     local: usize, // remotes[local] is local socket address
     remotes: Vec<SocketAddr>,
-    public_keys: Vec<()>,
-    secret_key: (),
+    public_keys: Vec<PublicKey>,
+    secret_key: SecretKey,
     back_channel: Sender<(usize, u32)>,
 }
 
@@ -119,9 +123,7 @@ impl Clone for Worker {
 
 impl Worker {
     pub fn send_message(&self, dest: SocketAddr, message: impl Serialize) {
-        self.socket
-            .send_to(&bincode::options().serialize(&message).unwrap(), dest)
-            .unwrap();
+        self.socket.send_to(&serialize(&message), dest).unwrap();
     }
 
     pub fn send_message_to_replica(&self, id: u8, message: impl Serialize) {
@@ -129,7 +131,7 @@ impl Worker {
     }
 
     pub fn send_message_to_all(&self, message: impl Serialize) {
-        let message = bincode::options().serialize(&message).unwrap();
+        let message = serialize(&message);
         for (i, &dest) in self.remotes.iter().enumerate() {
             if i == self.local {
                 continue;
@@ -166,7 +168,7 @@ struct ReceiverData<M> {
     wake_reaction: u32,
 }
 
-impl<M> TransportRuntime<M> {
+impl<C> TransportRuntime<C> {
     pub fn new(config: Config) -> Self {
         let (back_sender, back_channel) = channel();
         Self {
@@ -200,13 +202,13 @@ where
     }
 }
 
-impl<M> TransportRuntime<M> {
+impl<C> TransportRuntime<C> {
     pub fn create_transport<T, R>(
         &mut self,
         addr: SocketAddr,
         replica_id: u8,
         n_worker: usize,
-        receiver_mut: impl Fn(&mut M) -> &mut T + 'static + Clone,
+        receiver_mut: impl Fn(&mut C) -> &mut T + 'static + Clone,
     ) -> Transport<R>
     where
         T: TransportReceiver + ReactorMut<R>,
@@ -229,8 +231,11 @@ impl<M> TransportRuntime<M> {
             local: replica_id as _,
             remotes: self.config.remotes.clone(),
             public_keys: self.config.public_keys.clone(),
-            // secret_key: self.config.secret_keys[replica_id as usize], // TODO
-            secret_key: (),
+            secret_key: if replica_id != ReplicaId::MAX {
+                self.config.secret_keys[replica_id as usize].clone()
+            } else {
+                SecretKey::Disabled
+            },
             socket: socket.try_clone().unwrap(),
             back_channel: self.back_sender.clone(),
         };
@@ -277,6 +282,8 @@ impl<M> TransportRuntime<M> {
                 Work::Pool(WorkerPool::new(n_worker, worker))
             },
             local_addr,
+            n: self.config.remotes.len(),
+            f: self.config.f,
         }
     }
 
@@ -323,14 +330,14 @@ impl<M> TransportRuntime<M> {
     pub fn create_timeout(
         &mut self,
         delay: Duration,
-        reaction: impl FnOnce(&mut M, &mut Self) + 'static,
+        reaction: impl FnOnce(&mut C, &mut Self) + 'static,
     ) {
         self.context_timeouts
             .push((Instant::now() + delay, Box::new(reaction)));
         self.update_wake_internal();
     }
 
-    pub fn run(&mut self, context: &mut M) {
+    pub fn run(&mut self, context: &mut C) {
         let mut buffer = [0; (u16::MAX - 20 - 8) as _];
         let mut event_buffer = [EpollEvent::empty(); 64];
         let mut events: &[EpollEvent] = &[];
@@ -354,7 +361,7 @@ impl<M> TransportRuntime<M> {
                 self.update_wake(id, earliest_timeout);
             }
 
-            if events == [] {
+            if events.is_empty() {
                 let len = epoll_wait(self.poll, &mut event_buffer, 0).unwrap();
                 events = &event_buffer[..len];
             }
@@ -378,14 +385,4 @@ impl<M> TransportRuntime<M> {
             }
         }
     }
-}
-
-pub fn deserialize<M>(message: &[u8]) -> M
-where
-    M: DeserializeOwned,
-{
-    bincode::options()
-        .allow_trailing_bytes()
-        .deserialize(message)
-        .unwrap()
 }
