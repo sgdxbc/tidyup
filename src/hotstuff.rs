@@ -545,3 +545,23 @@ impl Replica {
         (self.view_number as usize % self.transport.n) as _
     }
 }
+
+impl Drop for Replica {
+    fn drop(&mut self) {
+        if self.id == self.primary_id() {
+            let mut n_proposal = 0;
+            let mut n_request = 0;
+            for block in self.storage.values() {
+                if block.status != BlockStatus::Committed {
+                    continue;
+                }
+                n_proposal += 1;
+                n_request += block.requests.len();
+            }
+            println!(
+                "Average batch size {:.2}",
+                n_request as f32 / n_proposal as f32
+            );
+        }
+    }
+}

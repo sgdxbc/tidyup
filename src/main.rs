@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, TcpListener, TcpStream},
     process::id,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Barrier,
     },
     thread::{sleep, spawn},
@@ -17,6 +17,7 @@ use messages::{
 };
 use nix::{
     sched::{sched_setaffinity, CpuSet},
+    sys::signal::{signal, SigHandler, Signal},
     unistd::Pid,
 };
 use serde::{Deserialize, Serialize};
@@ -107,7 +108,7 @@ fn main() {
         sleep(Duration::from_secs(1));
         command.replica = None;
         command.client = Some(ClientCommand {
-            n: 20,
+            n: 300,
             n_transport: 16,
             ip: [10, 0, 0, 4].into(),
         });
@@ -202,6 +203,26 @@ fn run_replica(protocol: ProtocolMode, command: ReplicaCommand, config: Config, 
     };
     let mut runtime = TransportRuntime::new(config.clone());
     let mut replica = Replica::new(&protocol, command, &config, app, &mut runtime);
+
+    static SIGNAL: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn handle_interrupt(_: i32) {
+        SIGNAL.store(true, Ordering::SeqCst);
+    }
+    unsafe { signal(Signal::SIGINT, SigHandler::Handler(handle_interrupt)) }.unwrap();
+
+    fn check_signal(runtime: &mut TransportRuntime<Replica>) {
+        if SIGNAL.load(Ordering::SeqCst) {
+            runtime.stop()
+        } else {
+            runtime.create_timeout(Duration::from_secs(1), move |_, runtime| {
+                check_signal(runtime)
+            })
+        }
+    }
+    runtime.create_timeout(Duration::from_secs(1), move |_, runtime| {
+        check_signal(runtime)
+    });
     runtime.run(&mut replica);
 }
 
@@ -294,14 +315,16 @@ fn run_client(
             context.n_complete.swap(0, Ordering::SeqCst)
         );
         context.n_reported += 1;
-        if context.n_reported == 30 {
-            todo!()
+        if context.n_reported == 20 {
+            runtime.stop();
         } else {
             runtime.create_timeout(Duration::from_secs(1), on_report);
         }
     }
     if barrier.wait().is_leader() {
         runtime.create_timeout(Duration::from_secs(1), on_report);
+    } else {
+        runtime.create_timeout(Duration::from_secs(20), |_, runtime| runtime.stop());
     }
     runtime.run(&mut context);
 }

@@ -184,6 +184,7 @@ pub struct TransportRuntime<M> {
     config: Config,
     poll: RawFd,
 
+    is_running: bool,
     back_channel: Receiver<(usize, u32)>,
     back_sender: Sender<(usize, u32)>,
 }
@@ -208,9 +209,15 @@ impl<C> TransportRuntime<C> {
             context_timeouts: Vec::new(),
             config,
             poll: epoll_create().unwrap(),
+            is_running: false,
             back_channel,
             back_sender,
         }
+    }
+
+    pub fn stop(&mut self) {
+        assert!(self.is_running);
+        self.is_running = false;
     }
 }
 
@@ -366,10 +373,11 @@ impl<C> TransportRuntime<C> {
     }
 
     pub fn run(&mut self, context: &mut C) {
+        self.is_running = true;
         let mut buffer = [0; (u16::MAX - 20 - 8) as _];
         let mut event_buffer = [EpollEvent::empty(); 64];
         let mut events: &[EpollEvent] = &[];
-        loop {
+        while self.is_running {
             while Instant::now() >= self.wake_deadline {
                 if self.wake_transport == usize::MAX {
                     self.context_timeouts.swap_remove(self.wake_reaction as _).1(context, self);
