@@ -5,7 +5,7 @@ use std::{
     process::id,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Barrier,
+        Arc, Barrier, Mutex,
     },
     thread::{sleep, spawn},
     time::Duration,
@@ -59,6 +59,18 @@ struct ClientCommand {
     n: usize,
     n_transport: usize,
     ip: IpAddr,
+    n_report: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RunClient {
+    protocol: ProtocolMode,
+    app: AppMode,
+    command: ClientCommand,
+    config: Config,
+    n_complete: Arc<AtomicU32>,
+    barrier: Arc<Barrier>,
+    latencies: Arc<Mutex<Vec<Duration>>>,
 }
 
 fn main() {
@@ -108,9 +120,10 @@ fn main() {
         sleep(Duration::from_secs(1));
         command.replica = None;
         command.client = Some(ClientCommand {
-            n: 300,
-            n_transport: 16,
+            n: 1,
+            n_transport: 1,
             ip: [10, 0, 0, 4].into(),
+            n_report: 20,
         });
         TcpStream::connect(("nsl-node4.d1.comp.nus.edu.sg", 7000))
             .unwrap()
@@ -131,27 +144,41 @@ fn main() {
             run_replica(command.protocol, replica, command.config, command.app)
         }
         (None, Some(client)) => {
-            let n_complete = Arc::new(AtomicU32::new(0));
-            let barrier = Arc::new(Barrier::new(client.n_transport));
-            let handles = (0..client.n_transport)
+            let n_transport = client.n_transport;
+            let run_client = RunClient {
+                protocol: command.protocol,
+                app: command.app,
+                barrier: Arc::new(Barrier::new(client.n_transport)),
+                config: command.config,
+                n_complete: Arc::new(AtomicU32::new(0)),
+                latencies: Arc::new(Mutex::new(Vec::new())),
+                command: client,
+            };
+            let handles = (0..n_transport)
                 .map(|i| {
-                    let protocol = command.protocol.clone();
-                    let client = client.clone();
-                    let config = command.config.clone();
-                    let n_complete = n_complete.clone();
-                    let barrier = barrier.clone();
+                    let run_client = run_client.clone();
                     spawn(move || {
                         let mut cpu_set = CpuSet::new();
                         cpu_set.set(i).unwrap();
                         sched_setaffinity(Pid::from_raw(0), &cpu_set).unwrap();
 
-                        run_client(protocol, client, config, command.app, n_complete, barrier);
+                        run_client.enter_loop();
                     })
                 })
                 .collect::<Vec<_>>();
             for handle in handles {
                 handle.join().unwrap();
             }
+            let mut latencies = Arc::try_unwrap(run_client.latencies)
+                .unwrap()
+                .into_inner()
+                .unwrap();
+            latencies.sort_unstable();
+            println!(
+                "Latency 50th {:.3?} 99th {:.3?}",
+                latencies.get(latencies.len() / 2),
+                latencies.get(latencies.len() * 99 / 100)
+            );
         }
         _ => unreachable!(),
     }
@@ -271,62 +298,67 @@ impl LoopClient {
     }
 }
 
-fn run_client(
-    protocol: ProtocolMode,
-    command: ClientCommand,
-    config: Config,
-    app: AppMode,
-    n_complete: Arc<AtomicU32>,
-    barrier: Arc<Barrier>,
-) {
-    struct Context {
-        clients: Vec<LoopClient>,
-        n_complete: Arc<AtomicU32>,
-        n_reported: u32,
-    }
-
-    let mut runtime = TransportRuntime::new(config);
-    let mut clients = Vec::new();
-    for i in 0..command.n {
-        let client = Client::new(
-            &protocol,
-            &command,
-            &mut runtime,
-            move |context: &mut Context| &mut context.clients[i],
-        );
-        clients.push(LoopClient::new(&app, client, n_complete.clone()));
-    }
-
-    runtime.create_timeout(Duration::ZERO, |context, _| {
-        for client in &mut context.clients {
-            client.initiate();
+impl RunClient {
+    fn enter_loop(self) {
+        let mut runtime = TransportRuntime::new(self.config);
+        let mut clients = Vec::new();
+        for i in 0..self.command.n {
+            let client = Client::new(
+                &self.protocol,
+                &self.command,
+                &mut runtime,
+                move |context: &mut Context| &mut context.clients[i],
+            );
+            clients.push(LoopClient::new(&self.app, client, self.n_complete.clone()));
         }
-    });
 
-    let mut context = Context {
-        clients,
-        n_complete,
-        n_reported: 0,
-    };
+        runtime.create_timeout(Duration::ZERO, |context, _| {
+            for client in &mut context.clients {
+                client.initiate();
+            }
+        });
 
-    fn on_report(context: &mut Context, runtime: &mut TransportRuntime<Context>) {
-        println!(
-            "Interval throughput {} ops/sec",
-            context.n_complete.swap(0, Ordering::SeqCst)
-        );
-        context.n_reported += 1;
-        if context.n_reported == 20 {
-            runtime.stop();
-        } else {
+        struct Context {
+            clients: Vec<LoopClient>,
+            n_complete: Arc<AtomicU32>,
+            n_report: u32,
+        }
+
+        let mut context = Context {
+            clients,
+            n_complete: self.n_complete,
+            n_report: self.command.n_report,
+        };
+
+        fn on_report(context: &mut Context, runtime: &mut TransportRuntime<Context>) {
+            println!(
+                "Interval throughput {} ops/sec",
+                context.n_complete.swap(0, Ordering::SeqCst)
+            );
+            context.n_report -= 1;
+            if context.n_report == 0 {
+                runtime.stop();
+            } else {
+                runtime.create_timeout(Duration::from_secs(1), on_report);
+            }
+        }
+        if self.barrier.wait().is_leader() {
             runtime.create_timeout(Duration::from_secs(1), on_report);
+        } else {
+            runtime.create_timeout(
+                Duration::from_secs(self.command.n_report as _),
+                |_, runtime| runtime.stop(),
+            );
+        }
+        runtime.run(&mut context);
+
+        let mut latencies = self.latencies.lock().unwrap();
+        for client in context.clients {
+            latencies.extend(match client {
+                LoopClient::Null(client) => client.latencies,
+            });
         }
     }
-    if barrier.wait().is_leader() {
-        runtime.create_timeout(Duration::from_secs(1), on_report);
-    } else {
-        runtime.create_timeout(Duration::from_secs(20), |_, runtime| runtime.stop());
-    }
-    runtime.run(&mut context);
 }
 
 // main part end, below is boilerplate impl
