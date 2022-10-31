@@ -4,10 +4,12 @@ from asyncio import sleep, gather
 
 replicas = [
     "nsl-node1.d1.comp.nus.edu.sg",
+    "nsl-node2.d1.comp.nus.edu.sg",
+    "nsl-node3.d1.comp.nus.edu.sg",
     #
 ]
 clients = [
-    "nsl-node2.d1.comp.nus.edu.sg",
+    "nsl-node4.d1.comp.nus.edu.sg",
     #
 ]
 

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -21,16 +23,17 @@ pub struct Reply {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Generic {
-    certified: Digest,
-    certificate: Vec<(ReplicaId, Signature)>,
-    requests: Vec<Request>,
-    parent: Digest,
+    pub certified: Digest,
+    pub certificate: Vec<(ReplicaId, Signature)>,
+    pub requests: Vec<Request>,
+    pub parent: Digest,
+    pub replica_id: ReplicaId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vote {
-    digest: Digest,
-    replica_id: ReplicaId,
+    pub digest: Digest,
+    pub replica_id: ReplicaId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,8 +43,18 @@ pub enum ToReplica {
     Vote(Signed<Vote>),
 }
 
+impl Request {
+    pub fn remote(&self) -> SocketAddr {
+        self.client_id.0
+    }
+}
+
 impl Generic {
     pub fn verify_certificate(self, f: usize, public_keys: &[PublicKey]) -> Option<Self> {
+        if self.certified == Digest::default() {
+            return Some(self);
+        }
+
         if self.certificate.len() < 2 * f + 1 {
             return None;
         }

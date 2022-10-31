@@ -76,11 +76,42 @@ impl<R> Transport<R> {
         drop(self.reactions.remove(&id).unwrap()); // explicit discard closure
         self.timeouts.remove(&id).unwrap();
     }
+}
 
-    pub fn work(&mut self, task: impl FnOnce(&mut Worker) + Send + 'static) {
-        match &mut self.work {
+pub struct WorkTask<'a, R> {
+    transport: &'a mut Transport<R>,
+    task: Box<dyn FnOnce(&mut Worker) + Send>,
+}
+
+impl<R> WorkTask<'_, R> {
+    pub fn detach(self) {
+        match &mut self.transport.work {
+            Work::Inline(worker) => (self.task)(worker),
+            Work::Pool(pool) => pool.work(self.task),
+        }
+    }
+
+    pub fn then(self, reaction: impl FnOnce(&mut R) + 'static) {
+        self.transport.reaction_id += 1;
+        let id = self.transport.reaction_id;
+        self.transport.reactions.insert(id, Box::new(reaction));
+        let task = move |worker: &mut Worker| {
+            (self.task)(worker);
+            worker.trigger_reaction(id);
+        };
+        match &mut self.transport.work {
             Work::Inline(worker) => task(worker),
             Work::Pool(pool) => pool.work(task),
+        }
+    }
+}
+
+impl<R> Transport<R> {
+    #[must_use]
+    pub fn work(&mut self, task: impl FnOnce(&mut Worker) + Send + 'static) -> WorkTask<'_, R> {
+        WorkTask {
+            transport: self,
+            task: Box::new(task),
         }
     }
 
@@ -101,9 +132,8 @@ pub struct Worker {
     id: usize,
     socket: UdpSocket,
     local: usize, // remotes[local] is local socket address
-    remotes: Vec<SocketAddr>,
-    public_keys: Vec<PublicKey>,
-    secret_key: SecretKey,
+    pub config: Config,
+    pub secret_key: SecretKey,
     back_channel: Sender<(usize, u32)>,
 }
 
@@ -113,10 +143,9 @@ impl Clone for Worker {
             id: self.id,
             socket: self.socket.try_clone().unwrap(),
             local: self.local,
-            remotes: self.remotes.clone(),
-            public_keys: self.public_keys.clone(),
-            secret_key: self.secret_key.clone(),
             back_channel: self.back_channel.clone(),
+            secret_key: self.secret_key.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -127,12 +156,12 @@ impl Worker {
     }
 
     pub fn send_message_to_replica(&self, id: u8, message: impl Serialize) {
-        self.send_message(self.remotes[id as usize], message);
+        self.send_message(self.config.remotes[id as usize], message);
     }
 
     pub fn send_message_to_all(&self, message: impl Serialize) {
         let message = serialize(&message);
-        for (i, &dest) in self.remotes.iter().enumerate() {
+        for (i, &dest) in self.config.remotes.iter().enumerate() {
             if i == self.local {
                 continue;
             }
@@ -229,15 +258,14 @@ impl<C> TransportRuntime<C> {
         let worker = Worker {
             id,
             local: replica_id as _,
-            remotes: self.config.remotes.clone(),
-            public_keys: self.config.public_keys.clone(),
+            socket: socket.try_clone().unwrap(),
+            back_channel: self.back_sender.clone(),
             secret_key: if replica_id != ReplicaId::MAX {
                 self.config.secret_keys[replica_id as usize].clone()
             } else {
                 SecretKey::Disabled
             },
-            socket: socket.try_clone().unwrap(),
-            back_channel: self.back_sender.clone(),
+            config: self.config.clone(),
         };
 
         let local_addr = socket.local_addr().unwrap();

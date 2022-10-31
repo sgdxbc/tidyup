@@ -48,7 +48,7 @@ impl SecretKey {
 }
 
 impl<M> Signed<M> {
-    pub fn new(inner: M, secret_key: &SecretKey) -> Self
+    pub fn sign(inner: M, secret_key: &SecretKey) -> Self
     where
         M: Serialize,
     {

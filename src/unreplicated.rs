@@ -61,7 +61,8 @@ impl Client {
             op: self.op.clone().unwrap(),
         };
         self.transport
-            .work(move |worker| worker.send_message_to_replica(0, message));
+            .work(move |worker| worker.send_message_to_replica(0, message))
+            .detach();
         self.timeout = self
             .transport
             .create_timeout(Duration::from_secs(1), |self_| {
@@ -102,10 +103,10 @@ impl AsMut<Transport<Self>> for Replica {
 }
 
 impl Replica {
-    pub fn new(transport: Transport<Self>, app: Box<dyn App>) -> Self {
+    pub fn new(transport: Transport<Self>, app: impl App + 'static) -> Self {
         Self {
             transport,
-            app,
+            app: Box::new(app),
             op_number: 0,
             cache: HashMap::new(),
             log: Vec::new(),
@@ -121,6 +122,7 @@ impl TransportReceiver for Replica {
             self_
                 .transport
                 .work(move |worker| worker.send_message(remote, reply))
+                .detach();
         });
     }
 }
