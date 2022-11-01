@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use messages::{
-    deserialize,
+    deserialize_from,
     unreplicated::{Reply, Request},
     ClientId, OpNumber, RequestNumber,
 };
@@ -77,7 +77,7 @@ impl TransportReceiver for Client {
         if self.result.is_some() {
             return;
         }
-        let message = deserialize::<Reply>(message);
+        let message = deserialize_from::<Reply>(message);
         if message.request_number != self.request_number {
             return;
         }
@@ -116,38 +116,30 @@ impl Replica {
 
 impl TransportReceiver for Replica {
     fn receive_message(&mut self, message: &[u8]) {
-        let message = deserialize::<Request>(message);
-        self.wait_reply(&message, |self_, reply| {
-            let remote = message.remote();
-            self_
-                .transport
-                .work(move |worker| worker.send_message(remote, reply))
-                .detach();
-        });
-    }
-}
-
-impl Replica {
-    fn wait_reply(&mut self, request: &Request, then: impl FnOnce(&mut Self, Reply)) {
-        if let Some(reply) = self.cache.get(&request.client_id) {
-            if reply.request_number > request.request_number {
-                return;
+        let message = deserialize_from::<Request>(message);
+        let dest = message.remote();
+        match self.cache.get(&message.client_id) {
+            Some(reply) if reply.request_number > message.request_number => return,
+            Some(reply) if reply.request_number == message.request_number => {
+                let reply = reply.clone();
+                self.transport
+                    .work(move |worker| worker.send_message(dest, reply))
+                    .detach();
             }
-            if reply.request_number == request.request_number {
-                then(self, reply.clone());
-                return;
-            }
+            _ => {}
         }
 
-        self.log.push(request.clone());
+        self.log.push(message.clone());
         self.op_number += 1;
         assert_eq!(self.log.len() as OpNumber, self.op_number);
-        let result = self.app.execute(self.op_number, &request.op);
-        let message = Reply {
-            request_number: request.request_number,
+        let result = self.app.execute(self.op_number, &message.op);
+        let reply = Reply {
+            request_number: message.request_number,
             result,
         };
-        self.cache.insert(request.client_id, message.clone());
-        then(self, message);
+        self.cache.insert(message.client_id, reply.clone());
+        self.transport
+            .work(move |worker| worker.send_message(dest, reply))
+            .detach();
     }
 }

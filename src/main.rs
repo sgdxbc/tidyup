@@ -120,8 +120,8 @@ fn main() {
         sleep(Duration::from_secs(1));
         command.replica = None;
         command.client = Some(ClientCommand {
-            n: 1,
-            n_transport: 1,
+            n: 30,
+            n_transport: 16,
             ip: [10, 0, 0, 4].into(),
             n_report: 20,
         });

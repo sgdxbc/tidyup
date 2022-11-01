@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
+    mem::take,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use messages::{
     crypto::{Signature, Signed},
-    deserialize, digest,
-    hotstuff::{Generic, Reply, Request, ToReplica, Vote},
+    deserialize_from, digest,
+    hotstuff::{Generic, Reply, Request, ToReplica, Vote, GENESIS},
     ClientId, Digest, OpNumber, ReplicaId, RequestNumber, ViewNumber,
 };
 
@@ -89,7 +90,7 @@ impl TransportReceiver for Client {
         if self.op.is_none() {
             return;
         }
-        let message = deserialize::<Reply>(message);
+        let message = deserialize_from::<Reply>(message);
         if message.request_number != self.request_number {
             return;
         }
@@ -130,6 +131,8 @@ pub struct Replica {
 
     cache: HashMap<ClientId, (RequestNumber, Option<Reply>)>,
     waiting_delivered: HashMap<Digest, Vec<Box<dyn FnOnce(&mut Self)>>>,
+    waiting_certificate: HashMap<Digest, Vec<Box<dyn FnOnce(&mut Self)>>>,
+    waiting_request: Vec<Box<dyn FnOnce(&mut Self)>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -159,40 +162,44 @@ impl Replica {
     pub fn new(transport: Transport<Self>, id: ReplicaId, app: impl App + 'static) -> Self {
         let mut storage = HashMap::new();
         storage.insert(
-            Digest::default(),
+            GENESIS,
             Block {
                 status: BlockStatus::Committed,
                 ..Default::default()
             },
         );
         let mut certificates = HashMap::new();
-        certificates.insert(Digest::default(), HashMap::new());
-        Self {
+        certificates.insert(GENESIS, HashMap::new());
+        let mut self_ = Self {
             transport,
             id,
             app: Box::new(app),
             view_number: 0,
-            block_lock: Digest::default(),
-            block_execute: Digest::default(),
+            block_lock: GENESIS,
+            block_execute: GENESIS,
             cache: HashMap::new(),
             requests: Vec::new(),
             storage,
-            certified: Digest::default(),
+            certified: GENESIS,
             certificates,
-            parent: Digest::default(),
+            parent: GENESIS,
             vote_height: 0,
             waiting_delivered: HashMap::new(),
-        }
+            waiting_certificate: HashMap::new(),
+            waiting_request: Vec::new(),
+        };
+        self_.register_propose();
+        self_
     }
 }
 
 impl TransportReceiver for Replica {
     fn receive_message(&mut self, message: &[u8]) {
-        match deserialize::<ToReplica>(message) {
+        match deserialize_from::<ToReplica>(message) {
             ToReplica::Request(message) => self.handle_request(message),
-            ToReplica::Generic(message) => {
-                self.wait_verified_generic(message, Self::handle_generic)
-            }
+            ToReplica::Generic(message) => self.wait_verified_generic(message, |self_, message| {
+                self_.handle_generic(message);
+            }),
             ToReplica::Vote(message) => self.wait_verified_vote(message, Self::handle_vote),
         }
     }
@@ -217,18 +224,37 @@ impl Replica {
         self.cache
             .insert(message.client_id, (message.request_number, None));
 
-        if self.id != self.primary_id() {
-            return;
-        }
-        self.requests.push(message);
-        if self.parent == self.certified {
-            self.do_propose();
+        if self.id == self.primary_id() {
+            self.requests.push(message);
+            self.on_request();
         }
     }
 
-    fn handle_generic(&mut self, message: Generic) {
+    fn register_propose(&mut self) {
+        self.wait_certificate(self.parent, |self_| {
+            self_.wait_request(|self_| {
+                self_.do_propose();
+                self_.register_propose();
+            })
+        });
+    }
+
+    fn handle_generic(&mut self, message: Generic) -> Digest {
         let replica_id = message.replica_id;
         let digest = digest(&(&message.requests, &message.parent));
+        if replica_id != self.id {
+            for request in &message.requests {
+                if self
+                    .cache
+                    .get(&request.client_id)
+                    .filter(|&&(request_number, _)| request_number >= request.request_number)
+                    .is_none()
+                {
+                    self.cache
+                        .insert(request.client_id, (request.request_number, None));
+                }
+            }
+        }
         self.storage.entry(digest).or_insert(Block {
             height: OpNumber::MAX,
             requests: message.requests,
@@ -236,17 +262,21 @@ impl Replica {
             certified: message.certified,
             ..Default::default()
         });
-        self.certificates
-            .insert(message.certified, message.certificate.into_iter().collect());
+        //
+        if message.replica_id != self.id {
+            self.certificates
+                .insert(message.certified, message.certificate.into_iter().collect());
+            self.on_certificate(&message.certified);
+        }
 
         self.wait_delivered_block(
             digest,
             Box::new(move |self_| {
                 self_.do_update(digest);
 
-                self_.parent = digest;
                 if replica_id != self_.id {
-                    //
+                    self_.parent = digest;
+                    // cancel timeout for certified block
                 }
 
                 let mut opinion = false;
@@ -265,6 +295,10 @@ impl Replica {
                             opinion = true;
                         }
                     }
+                    assert!(
+                        opinion || replica_id != self_.id,
+                        "not voting for own proposal"
+                    );
                 }
 
                 if opinion {
@@ -273,13 +307,14 @@ impl Replica {
                 }
             }),
         );
+        digest
     }
 
     fn handle_vote(&mut self, message: Signed<Vote>) {
+        let certified = message.inner.digest;
         self.wait_delivered_block(
-            message.inner.digest,
+            certified,
             Box::new(move |self_| {
-                let certified = message.inner.digest;
                 let certificate = self_.certificates.entry(certified).or_insert_with(|| {
                     // not proposed by self
                     HashMap::new()
@@ -288,21 +323,11 @@ impl Replica {
                     return;
                 }
                 certificate.insert(message.inner.replica_id, message.signature);
-                if certificate.len() < self_.transport.n - self_.transport.f {
-                    return;
-                }
-                if self_.storage[&certified].height > self_.storage[&self_.certified].height {
-                    self_.certified = certified;
-                    if self_.id != self_.primary_id() {
-                        return;
+                if certificate.len() == self_.transport.n - self_.transport.f {
+                    if self_.storage[&certified].height > self_.storage[&self_.certified].height {
+                        self_.certified = certified;
                     }
-                    if self_.certified != self_.parent {
-                        return;
-                    }
-                    if self_.cache.values().all(|(_, reply)| reply.is_some()) {
-                        return;
-                    }
-                    self_.do_propose();
+                    self_.on_certificate(&certified);
                 }
             }),
         )
@@ -393,13 +418,59 @@ impl Replica {
                         block.status = BlockStatus::Voting;
                         block.height = parent_height + 1;
                         then(self_);
-                        for then in self_.waiting_delivered.remove(&digest).unwrap_or_default() {
-                            then(self_);
-                        }
+                        self_.on_delivered_block(&digest);
                     }),
                 );
             }),
         );
+    }
+
+    fn on_delivered_block(&mut self, digest: &Digest) {
+        for then in self.waiting_delivered.remove(digest).into_iter().flatten() {
+            then(self);
+        }
+    }
+
+    fn wait_certificate(&mut self, digest: Digest, then: impl FnOnce(&mut Self) + 'static) {
+        if digest == GENESIS {
+            then(self);
+            return;
+        }
+        if let Some(certificate) = self.certificates.get(&digest) {
+            if certificate.len() >= self.transport.n - self.transport.f {
+                then(self);
+                return;
+            }
+        }
+        self.waiting_certificate
+            .entry(digest)
+            .or_default()
+            .push(Box::new(then));
+    }
+
+    fn on_certificate(&mut self, digest: &Digest) {
+        for then in self
+            .waiting_certificate
+            .remove(digest)
+            .into_iter()
+            .flatten()
+        {
+            then(self);
+        }
+    }
+
+    fn wait_request(&mut self, then: impl FnOnce(&mut Self) + 'static) {
+        if self.cache.values().any(|(_, reply)| reply.is_none()) {
+            then(self);
+            return;
+        }
+        self.waiting_request.push(Box::new(then));
+    }
+
+    fn on_request(&mut self) {
+        for then in take(&mut self.waiting_request) {
+            then(self)
+        }
     }
 
     fn do_propose(&mut self) {
@@ -426,7 +497,7 @@ impl Replica {
                 }
             })
             .detach();
-        self.handle_generic(generic);
+        self.parent = self.handle_generic(generic); // loopback
     }
 
     fn do_update(&mut self, digest: Digest) {

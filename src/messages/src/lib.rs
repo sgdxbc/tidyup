@@ -30,17 +30,6 @@ pub fn serialize(message: &impl serde::Serialize) -> Vec<u8> {
     bincode::options().serialize(&message).unwrap()
 }
 
-pub fn deserialize<M>(message: &[u8]) -> M
-where
-    M: serde::de::DeserializeOwned,
-{
-    use bincode::Options;
-    bincode::options()
-        .allow_trailing_bytes()
-        .deserialize(message)
-        .unwrap()
-}
-
 pub fn deserialize_from<M>(reader: impl std::io::Read) -> M
 where
     M: serde::de::DeserializeOwned,

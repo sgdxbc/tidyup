@@ -2,13 +2,13 @@ from asyncio import create_subprocess_exec as proc, run, create_task as spawn
 from asyncio.subprocess import PIPE
 from asyncio import sleep, gather
 
-replicas = [
+nodes = [
     "nsl-node1.d1.comp.nus.edu.sg",
     "nsl-node2.d1.comp.nus.edu.sg",
     "nsl-node3.d1.comp.nus.edu.sg",
     #
 ]
-clients = [
+wait_nodes = [
     "nsl-node4.d1.comp.nus.edu.sg",
     #
 ]
@@ -22,16 +22,16 @@ async def main():
     await p.wait()
     assert p.returncode == 0
 
-    replica_tasks = [spawn(remote(host, f"[{i}]")) for i, host in enumerate(replicas)]
-    client_tasks = [spawn(remote(host, "[C]")) for host in clients]
+    tasks = [spawn(remote(host, f"[{i}]")) for i, host in enumerate(nodes)]
+    wait_tasks = [spawn(remote(host, "[C]")) for host in wait_nodes]
 
     await sleep(2)
     p = await proc("./target/release/tidyup", "command")
     await p.wait()
 
-    await gather(*client_tasks)
-    await gather(*[interrupt_remote(host) for host in replicas])
-    await gather(*replica_tasks)
+    await gather(*wait_tasks)
+    await gather(*[interrupt_remote(host) for host in nodes])
+    await gather(*tasks)
 
 
 async def remote(host, tag):
@@ -62,6 +62,6 @@ except KeyboardInterrupt:
     print("Aborting")
 
     async def clean_up():
-        await gather(*[interrupt_remote(host) for host in replicas + clients])
+        await gather(*[interrupt_remote(host) for host in nodes + wait_nodes])
 
     run(clean_up())

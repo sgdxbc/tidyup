@@ -49,9 +49,11 @@ impl Request {
     }
 }
 
+pub const GENESIS: Digest = [0; 32];
+
 impl Generic {
     pub fn verify_certificate(self, f: usize, public_keys: &[PublicKey]) -> Option<Self> {
-        if self.certified == Digest::default() {
+        if self.certified == GENESIS {
             return Some(self);
         }
 
