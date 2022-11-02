@@ -94,8 +94,8 @@ fn main() {
             client: None,
             replica: None,
         };
-        for i in 0..command.config.remotes.len() {
-            let secret_key = SecretKey::new_secp256k1(i as ReplicaId);
+        for _ in 0..command.config.remotes.len() {
+            let secret_key = SecretKey::generate_secp256k1();
             let public_key = PublicKey::new_secp256k1(&secret_key);
             command.config.public_keys.push(public_key);
             command.config.secret_keys.push(secret_key);

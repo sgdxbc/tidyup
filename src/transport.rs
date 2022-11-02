@@ -9,7 +9,7 @@ use std::{
 };
 
 use messages::{
-    crypto::{PublicKey, SecretKey},
+    crypto::{PublicKey, QuorumKey, SecretKey},
     serialize, ClientId, ReplicaId,
 };
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
@@ -134,6 +134,7 @@ pub struct Worker {
     local: usize, // remotes[local] is local socket address
     pub config: Config,
     pub secret_key: SecretKey,
+    pub quorum_key: QuorumKey,
     back_channel: Sender<(usize, u32)>,
 }
 
@@ -145,6 +146,7 @@ impl Clone for Worker {
             local: self.local,
             back_channel: self.back_channel.clone(),
             secret_key: self.secret_key.clone(),
+            quorum_key: self.quorum_key.clone(),
             config: self.config.clone(),
         }
     }
@@ -272,6 +274,7 @@ impl<C> TransportRuntime<C> {
             } else {
                 SecretKey::Disabled
             },
+            quorum_key: QuorumKey::Vec(self.config.public_keys.clone()), //
             config: self.config.clone(),
         };
 

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{PublicKey, QuorumSigned, Signed},
+    crypto::{QuorumKey, QuorumSigned, Signed},
     ClientId, Digest, ReplicaId, RequestNumber,
 };
 
@@ -51,12 +51,12 @@ impl Request {
 pub const GENESIS: Digest = [0; 32];
 
 impl Generic {
-    pub fn verify_certificate(self, f: usize, public_keys: &[PublicKey]) -> Option<Self> {
+    pub fn verify_certificate(self, f: usize, quorum_key: &QuorumKey) -> Option<Self> {
         if self.certified.inner == GENESIS {
             Some(self)
         } else {
             self.certified
-                .verify(f, public_keys)
+                .verify(f, quorum_key)
                 .map(|certified| Self { certified, ..self })
         }
     }

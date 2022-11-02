@@ -1,3 +1,7 @@
+// TODO
+// vote as soon as generic get verified, without generic's certificate getting
+// verified
+// quorum signature
 use std::{
     collections::{HashMap, HashSet},
     mem::take,
@@ -495,7 +499,7 @@ impl Replica {
                         .and_then(|message| {
                             message
                                 .inner
-                                .verify_certificate(worker.config.f, &worker.config.public_keys)
+                                .verify_certificate(worker.config.f, &worker.quorum_key)
                         });
                 }
             })
