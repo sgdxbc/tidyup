@@ -62,18 +62,14 @@ impl Generic {
         }
 
         for (id, signature) in &self.certificate {
-            if (Signed {
+            (Signed {
                 inner: Vote {
                     digest: self.certified,
                     replica_id: *id,
                 },
                 signature: signature.clone(),
             })
-            .verify(&public_keys[*id as usize])
-            .is_none()
-            {
-                return None;
-            }
+            .verify(&public_keys[*id as usize])?;
         }
         Some(self)
     }
