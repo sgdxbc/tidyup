@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{PublicKey, Signature, Signed},
+    crypto::{PublicKey, QuorumSigned, Signed},
     ClientId, Digest, ReplicaId, RequestNumber,
 };
 
@@ -23,8 +23,7 @@ pub struct Reply {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Generic {
-    pub certified: Digest,
-    pub certificate: Vec<(ReplicaId, Signature)>,
+    pub certified: QuorumSigned<Digest>,
     pub requests: Vec<Request>,
     pub parent: Digest,
     pub replica_id: ReplicaId,
@@ -32,7 +31,7 @@ pub struct Generic {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vote {
-    pub digest: Digest,
+    pub digest: Signed<Digest>,
     pub replica_id: ReplicaId,
 }
 
@@ -40,7 +39,7 @@ pub struct Vote {
 pub enum ToReplica {
     Request(Request),
     Generic(Signed<Generic>),
-    Vote(Signed<Vote>),
+    Vote(Vote),
 }
 
 impl Request {
@@ -53,24 +52,12 @@ pub const GENESIS: Digest = [0; 32];
 
 impl Generic {
     pub fn verify_certificate(self, f: usize, public_keys: &[PublicKey]) -> Option<Self> {
-        if self.certified == GENESIS {
-            return Some(self);
+        if self.certified.inner == GENESIS {
+            Some(self)
+        } else {
+            self.certified
+                .verify(f, public_keys)
+                .map(|certified| Self { certified, ..self })
         }
-
-        if self.certificate.len() < 2 * f + 1 {
-            return None;
-        }
-
-        for (id, signature) in &self.certificate {
-            (Signed {
-                inner: Vote {
-                    digest: self.certified,
-                    replica_id: *id,
-                },
-                signature: signature.clone(),
-            })
-            .verify(&public_keys[*id as usize])?;
-        }
-        Some(self)
     }
 }

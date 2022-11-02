@@ -6,7 +6,7 @@ use std::{
 };
 
 use messages::{
-    crypto::{Signature, Signed},
+    crypto::{QuorumSignature, QuorumSigned, Signature, Signed},
     deserialize_from, digest,
     hotstuff::{Generic, Reply, Request, ToReplica, Vote, GENESIS},
     ClientId, Digest, OpNumber, ReplicaId, RequestNumber, ViewNumber,
@@ -124,8 +124,8 @@ pub struct Replica {
     block_execute: Digest,
     // primary
     requests: Vec<Request>,
-    certified: Digest,
-    certificates: HashMap<Digest, HashMap<ReplicaId, Signature>>,
+    certified: QuorumSigned<Digest>,
+    votes: HashMap<Digest, HashMap<ReplicaId, Signature>>,
     parent: Digest,
     // backup
     vote_height: OpNumber,
@@ -180,8 +180,11 @@ impl Replica {
             cache: HashMap::new(),
             requests: Vec::new(),
             storage,
-            certified: GENESIS,
-            certificates,
+            certified: QuorumSigned {
+                inner: GENESIS,
+                signature: QuorumSignature::Vec(Vec::new()),
+            },
+            votes: certificates,
             parent: GENESIS,
             vote_height: 0,
             waiting_delivered: HashMap::new(),
@@ -261,13 +264,17 @@ impl Replica {
             height: OpNumber::MAX,
             requests: message.requests,
             parent: message.parent,
-            certified: message.certified,
+            certified: message.certified.inner,
             ..Default::default()
         });
         if message.replica_id != self.id {
-            self.certificates
-                .insert(message.certified, message.certificate.into_iter().collect());
-            self.on_certificate(&message.certified);
+            if self.storage[&message.certified.inner].height
+                > self.storage[&self.certified.inner].height
+            {
+                let digest = message.certified.inner;
+                self.certified = message.certified;
+                self.on_certificate(&digest);
+            }
         }
 
         self.wait_delivered_block(
@@ -304,24 +311,30 @@ impl Replica {
         block == self.block_lock
     }
 
-    fn handle_vote(&mut self, message: Signed<Vote>) {
-        let certified = message.inner.digest;
+    fn handle_vote(&mut self, message: Vote) {
+        let voted = message.digest.inner;
         self.wait_delivered_block(
-            certified,
+            voted,
             Box::new(move |self_| {
-                let certificate = self_.certificates.entry(certified).or_insert_with(|| {
+                let certificate = self_.votes.entry(voted).or_insert_with(|| {
                     // not proposed by self
                     HashMap::new()
                 });
                 if certificate.len() >= self_.transport.n - self_.transport.f {
                     return;
                 }
-                certificate.insert(message.inner.replica_id, message.signature);
+                certificate.insert(message.replica_id, message.digest.signature);
                 if certificate.len() == self_.transport.n - self_.transport.f {
-                    if self_.storage[&certified].height > self_.storage[&self_.certified].height {
-                        self_.certified = certified;
+                    if self_.storage[&voted].height > self_.storage[&self_.certified.inner].height {
+                        self_.certified = QuorumSigned {
+                            inner: voted,
+                            // TODO
+                            signature: QuorumSignature::Vec(
+                                certificate.clone().into_iter().collect(),
+                            ),
+                        };
+                        self_.on_certificate(&voted);
                     }
-                    self_.on_certificate(&certified);
                 }
             }),
         )
@@ -329,13 +342,9 @@ impl Replica {
 
     fn do_propose(&mut self) {
         assert_eq!(self.primary_id(), self.id);
-        assert_eq!(self.parent, self.certified);
+        assert_eq!(self.parent, self.certified.inner);
         let generic = Generic {
-            certified: self.certified,
-            certificate: self.certificates[&self.certified]
-                .iter()
-                .map(|(&id, signature)| (id, signature.clone()))
-                .collect(),
+            certified: self.certified.clone(),
             parent: self.parent,
             requests: self.requests.drain(..).collect(), //
             replica_id: self.id,
@@ -361,9 +370,10 @@ impl Replica {
         if self.storage[&block2_digest].status == BlockStatus::Committed {
             return;
         }
-        if self.storage[&block2_digest].height > self.storage[&self.certified].height {
-            self.certified = block2_digest;
-        }
+        // if self.storage[&block2_digest].height > self.storage[&self.certified.inner].height {
+        //     self.certified = block2_digest;
+        // }
+        assert!(self.storage[&block2_digest].height <= self.storage[&self.certified.inner].height);
         let block1_digest = self.storage[&block2_digest].certified;
         if self.storage[&block1_digest].status == BlockStatus::Committed {
             return;
@@ -432,16 +442,16 @@ impl Replica {
     }
 
     fn do_vote(&mut self, id: ReplicaId, digest: Digest) {
-        let vote = Vote {
-            digest,
-            replica_id: self.id,
-        };
+        let replica_id = self.id;
         if id != self.id {
             self.transport
                 .work(move |worker| {
                     worker.send_message_to_replica(
                         id,
-                        ToReplica::Vote(Signed::sign(vote, &worker.secret_key)),
+                        ToReplica::Vote(Vote {
+                            digest: Signed::sign(digest, &worker.secret_key),
+                            replica_id,
+                        }),
                     )
                 })
                 .detach()
@@ -451,8 +461,10 @@ impl Replica {
                 .work({
                     let signed_vote = signed_vote.clone();
                     move |worker| {
-                        *signed_vote.try_lock().unwrap() =
-                            Some(Signed::sign(vote, &worker.secret_key))
+                        *signed_vote.try_lock().unwrap() = Some(Vote {
+                            digest: Signed::sign(digest, &worker.secret_key),
+                            replica_id,
+                        })
                     }
                 })
                 .then(move |self_| {
@@ -498,11 +510,7 @@ impl Replica {
             });
     }
 
-    fn wait_verified_vote(
-        &mut self,
-        message: Signed<Vote>,
-        then: impl FnOnce(&mut Self, Signed<Vote>) + 'static,
-    ) {
+    fn wait_verified_vote(&mut self, message: Vote, then: impl FnOnce(&mut Self, Vote) + 'static) {
         let verified_message = Arc::new(Mutex::new(Some(message)));
         let message = verified_message.clone();
         self.transport
@@ -510,9 +518,16 @@ impl Replica {
                 move |worker| {
                     let mut verified_message = message.try_lock().unwrap();
                     let message = verified_message.take().unwrap();
-                    let id = message.inner.replica_id;
-                    if let Some(message) = message.verify(&worker.config.public_keys[id as usize]) {
-                        *verified_message = Some(message);
+                    let id = message.replica_id;
+                    if let Some(digest) = message
+                        .digest
+                        .verify(&worker.config.public_keys[id as usize])
+                    {
+                        // the reassembling feels a little bit dumb...
+                        *verified_message = Some(Vote {
+                            digest,
+                            replica_id: id,
+                        });
                     }
                 }
             })
@@ -565,16 +580,13 @@ impl Replica {
         }
     }
 
+    // trigger when `digest` becomes the highest certified block
+    // never trigger if when `digest` is known to be certified, another higher
+    // certified block exists as well
     fn wait_certificate(&mut self, digest: Digest, then: impl FnOnce(&mut Self) + 'static) {
-        if digest == GENESIS {
+        if digest == self.certified.inner {
             then(self);
             return;
-        }
-        if let Some(certificate) = self.certificates.get(&digest) {
-            if certificate.len() >= self.transport.n - self.transport.f {
-                then(self);
-                return;
-            }
         }
         self.waiting_certificate
             .entry(digest)
@@ -593,6 +605,7 @@ impl Replica {
         }
     }
 
+    // trigger when there is request known not to be resolved yet
     fn wait_request(&mut self, then: impl FnOnce(&mut Self) + 'static) {
         if self.cache.values().any(|(_, reply)| reply.is_none()) {
             then(self);

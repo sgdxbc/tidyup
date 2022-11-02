@@ -10,9 +10,20 @@ pub enum Signature {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QuorumSignature {
+    Vec(Vec<(ReplicaId, Signature)>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signed<M> {
     pub inner: M,
     pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuorumSigned<M> {
+    pub inner: M,
+    pub signature: QuorumSignature,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +100,33 @@ impl<M> Signed<M> {
                 .ok()
                 .map(|()| self),
             _ => None,
+        }
+    }
+}
+
+impl<M> QuorumSigned<M> {
+    pub fn verify(self, f: usize, public_keys: &[PublicKey]) -> Option<Self>
+    where
+        M: Serialize,
+    {
+        match self.signature {
+            QuorumSignature::Vec(quorum) => {
+                if quorum.len() < 2 * f + 1 {
+                    return None;
+                }
+                let mut verified_quorum = Vec::new();
+                let mut inner = self.inner;
+                for (id, signature) in quorum {
+                    let verified =
+                        (Signed { inner, signature }).verify(&public_keys[id as usize])?;
+                    inner = verified.inner;
+                    verified_quorum.push((id, verified.signature));
+                }
+                Some(QuorumSigned {
+                    inner,
+                    signature: QuorumSignature::Vec(verified_quorum),
+                })
+            }
         }
     }
 }
