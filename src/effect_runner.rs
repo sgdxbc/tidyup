@@ -32,10 +32,13 @@ use crate::misc::bind_core;
 /// blocks application immediately when no idle worker is for an effect, instead
 /// of setting up a queue and work-stealing workers. According to previous
 /// exprience this choice is better for this project's use case.
-pub struct EffectRunner<T> {
-    idle_bits: Arc<AtomicU64>,
-    slots: Arc<[Mutex<Box<dyn FnOnce(&mut T) + Send>>]>,
-    handles: Box<[JoinHandle<()>]>,
+pub enum EffectRunner<T> {
+    ThreadPool {
+        idle_bits: Arc<AtomicU64>,
+        slots: Arc<[Mutex<Box<dyn FnOnce(&mut T) + Send>>]>,
+        handles: Box<[JoinHandle<()>]>,
+    },
+    Inline(T),
 }
 
 pub trait EffectContext {
@@ -51,6 +54,7 @@ impl<T> EffectRunner<T> {
     where
         T: EffectContext + Send + 'static,
     {
+        assert_ne!(context_iter.len(), 0);
         assert!(context_iter.len() < u64::BITS as _);
         let idle_bits = Arc::new(AtomicU64::new(
             (0..context_iter.len() as u32)
@@ -64,7 +68,7 @@ impl<T> EffectRunner<T> {
                 .take(context_iter.len())
                 .collect::<Vec<_>>(),
         );
-        Self {
+        Self::ThreadPool {
             handles: context_iter
                 .enumerate()
                 .map(|(i, context)| {
@@ -114,30 +118,54 @@ impl<T> EffectRunner<T> {
         }
     }
 
-    pub fn run(&self, effect: impl FnOnce(&mut T) + Send + 'static) -> u32 {
-        let (mut bits, mut i);
-        while {
-            bits = self.idle_bits.load(Ordering::SeqCst);
-            i = bits.trailing_zeros();
-            i == u64::BITS - 1
-        } {}
-        *self.slots[i as usize].try_lock().unwrap() = Box::new(effect);
-        while let Err(bits_) = self.idle_bits.compare_exchange_weak(
-            bits,
-            bits ^ (1 << i),
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            bits = bits_
+    pub fn run(&mut self, effect: impl FnOnce(&mut T) + Send + 'static) -> u32 {
+        match self {
+            Self::Inline(context) => {
+                effect(context);
+                0
+            }
+            Self::ThreadPool {
+                idle_bits, slots, ..
+            } => {
+                let (mut bits, mut i);
+                while {
+                    bits = idle_bits.load(Ordering::SeqCst);
+                    i = bits.trailing_zeros();
+                    i == u64::BITS - 1
+                } {}
+                *slots[i as usize].try_lock().unwrap() = Box::new(effect);
+                while let Err(bits_) = idle_bits.compare_exchange_weak(
+                    bits,
+                    bits ^ (1 << i),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    bits = bits_
+                }
+                i
+            }
         }
-        i
+    }
+
+    pub fn run_idle(&mut self) -> bool
+    where
+        T: EffectContext,
+    {
+        if let Self::Inline(context) = self {
+            context.idle_poll()
+        } else {
+            false
+        }
     }
 }
 
 impl<T> Drop for EffectRunner<T> {
     fn drop(&mut self) {
-        self.idle_bits.store(Self::SHUTDOWN, Ordering::SeqCst);
-        for handle in Vec::from(take(&mut self.handles)).into_iter() {
+        let Self::ThreadPool { idle_bits, handles , ..} = self else {
+            return;
+        };
+        idle_bits.store(Self::SHUTDOWN, Ordering::SeqCst);
+        for handle in Vec::from(take(handles)).into_iter() {
             handle.join().unwrap()
         }
     }

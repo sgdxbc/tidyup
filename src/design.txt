@@ -33,4 +33,17 @@ case of simulation, multiple receiver types means multiple closure types, each
 accepts different "`this`". It seems necessary to switch to poll mode to 
 workaround callback-related problems.
 
+Short summary.
+* For replicas, they should be able to switch between offloading mode and inline
+mode, for benchmark and simulation respectively.
+* For replicas, they should be able to switch between exclusive mode and 
+cooperative mode, for benchmark and simulation respectively.
+* For everything, they should be able to receive message and timer notification
+from both benchmark and simulated environment. They should also send message and
+manage timers in such fashion.
+* We want a poll-mode interface to avoid receiver types appear in their 
+interface method signatures. This also means receivers should actively detect
+external events (as while as actively create external events) instead of 
+passively providing certain callbacks.
+
 [WIP]

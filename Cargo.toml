@@ -12,4 +12,4 @@ message = { version = "0.1.0", path = "src/message" }
 nix = "0.25.0"
 
 [profile.release]
-panic = 'abort'
+panic = "abort"

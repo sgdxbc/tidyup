@@ -172,7 +172,7 @@ impl Receiver for Replica {
             self.handle_request(message);
             true
         } else {
-            false
+            self.runner.run_idle()
         }
     }
 }

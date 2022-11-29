@@ -21,12 +21,17 @@ impl Driver<unreplicated::Replica> {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
         let rx_channel = Arc::new(Mutex::new(RxChannel::Udp(socket.try_clone().unwrap())));
-        let runner = EffectRunner::new((0..n_runner_thread).map(|_| unreplicated::ReplicaEffect {
+        let new_context = || unreplicated::ReplicaEffect {
             tx: TxChannel::Udp(socket.try_clone().unwrap()),
             rx: rx_channel.clone(),
             buffer: [0; 1500],
             message_channel: tx.clone(),
-        }));
+        };
+        let runner = if n_runner_thread != 0 {
+            EffectRunner::new((0..n_runner_thread).map(|_| new_context()))
+        } else {
+            EffectRunner::Inline(new_context())
+        };
         Self {
             replica: unreplicated::Replica::new(config, runner, rx),
         }
