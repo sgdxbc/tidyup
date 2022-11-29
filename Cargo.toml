@@ -1,0 +1,15 @@
+[package]
+name = "tidyup-v2"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["src/message"]
+
+[dependencies]
+bincode = "1.3.3"
+message = { version = "0.1.0", path = "src/message" }
+nix = "0.25.0"
+
+[profile.release]
+panic = 'abort'
