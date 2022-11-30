@@ -14,9 +14,10 @@ use std::{
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
 
 use crate::{
-    misc::bind_core,
+    misc::{alloc_client_id, bind_core},
+    state::ClientCommon,
     transport::{Clock, Config, RxChannel, TxChannel},
-    unreplicated, Client,
+    unreplicated, ClientState,
 };
 
 pub struct Driver<T> {
@@ -50,13 +51,15 @@ impl Driver<unreplicated::Client> {
                     &mut EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, i as _),
                 )
                 .unwrap();
-                let effect = unreplicated::ClientEffect {
+                let common = ClientCommon {
+                    id: alloc_client_id(),
+                    config: config.clone(),
                     tx: TxChannel::Udp(socket.try_clone().unwrap()),
                     rx_addr: socket.local_addr().unwrap(),
                     rx: RxChannel::Udp(socket),
                     clock: Clock::Real,
                 };
-                unreplicated::Client::new(config.clone(), effect)
+                unreplicated::Client::new(common)
             })
             .collect();
         let poll_instants = vec![None; n_client.get()].into_boxed_slice();
@@ -74,7 +77,7 @@ impl Driver<unreplicated::Client> {
 impl<T> Driver<T> {
     pub fn run(&mut self)
     where
-        T: Client,
+        T: ClientState,
     {
         bind_core();
 
@@ -116,7 +119,7 @@ impl<T> Driver<T> {
 
     fn poll_client(&mut self, i: usize) -> bool
     where
-        T: Client,
+        T: ClientState,
     {
         let poll_again = self.clients[i].poll();
         if let Some(_result) = self.clients[i].take_result() {
@@ -129,7 +132,7 @@ impl<T> Driver<T> {
 
     fn update_timer(&mut self, i: usize)
     where
-        T: Client,
+        T: ClientState,
     {
         let poll_at = self.clients[i].poll_at();
         if poll_at == self.poll_instants[i] {

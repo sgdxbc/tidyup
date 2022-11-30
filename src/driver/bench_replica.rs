@@ -10,9 +10,9 @@ use std::{
 
 use crate::{
     misc::bind_core,
-    receiver::{Deploy, ReplicaArgs},
-    transport::{Config, RxChannel, TxChannel},
-    Receiver,
+    state::{Deploy, ReplicaCommon},
+    transport::{Clock, Config, RxChannel, TxChannel},
+    State,
 };
 
 #[derive(Default)]
@@ -22,12 +22,12 @@ pub struct Driver {
 }
 
 impl Deploy for Driver {
-    fn deploy(&mut self, mut receiver: impl Receiver + Send + 'static) {
+    fn deploy(&mut self, mut state: impl State + Send + 'static) {
         let shutdown = self.shutdown.clone();
         self.threads.push(spawn(move || {
             bind_core();
             while !shutdown.load(Ordering::SeqCst) {
-                receiver.poll();
+                state.poll();
             }
         }))
     }
@@ -45,15 +45,16 @@ impl Drop for Driver {
 }
 
 impl Driver {
-    pub fn args(config: Arc<Config>, i: usize, app: (), n_effect: usize) -> ReplicaArgs {
+    pub fn args(config: Arc<Config>, i: usize, app: (), n_effect: usize) -> ReplicaCommon {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
-        ReplicaArgs {
+        ReplicaCommon {
             tx: TxChannel::Udp(socket.try_clone().unwrap()),
             rx: RxChannel::Udp(socket),
             n_effect,
             id: i,
             app,
+            clock: Clock::Real,
         }
     }
 }

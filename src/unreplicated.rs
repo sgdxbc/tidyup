@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     convert::identity,
     net::SocketAddr,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -10,47 +9,35 @@ use bincode::Options;
 use message::{Reply, Request};
 
 use crate::{
-    misc::alloc_client_id,
-    receiver::{Deploy, ReplicaArgs},
-    transport::{Clock, Config, RxChannel, TxChannel},
-    Receiver,
+    state::ClientCommon,
+    transport::{RxChannel, TxChannel},
+    ClientState, Deploy, ReplicaCommon, State,
 };
 
 pub struct Client {
-    id: u16,
+    common: ClientCommon,
     request_number: u32,
     op: Option<Box<[u8]>>,
     result: Option<Box<[u8]>>,
 
-    config: Arc<Config>,
-    effect: ClientEffect,
     resend_instant: Option<Instant>,
     buffer: [u8; 1500],
 }
 
-pub struct ClientEffect {
-    pub tx: TxChannel,
-    pub rx: RxChannel,
-    pub rx_addr: SocketAddr,
-    pub clock: Clock,
-}
-
 impl Client {
-    pub fn new(config: Arc<Config>, effect: ClientEffect) -> Self {
+    pub fn new(common: ClientCommon) -> Self {
         Self {
-            id: alloc_client_id(),
             request_number: 0,
             op: None,
             result: None,
-            config,
-            effect,
+            common,
             resend_instant: None,
             buffer: [0; 1500],
         }
     }
 }
 
-impl crate::Client for Client {
+impl ClientState for Client {
     fn invoke(&mut self, op: Box<[u8]>) {
         assert!(self.op.is_none());
         self.request_number += 1;
@@ -68,21 +55,21 @@ impl crate::Client for Client {
     }
 }
 
-impl Receiver for Client {
+impl State for Client {
     fn poll(&mut self) -> bool {
         if self
             .resend_instant
-            .filter(|&instant| instant <= self.effect.clock.now())
+            .filter(|&instant| instant <= self.common.clock.now())
             .is_some()
         {
             println!(
                 "! Resend: Client {} Request {}",
-                self.id, self.request_number
+                self.common.id, self.request_number
             );
             self.do_send();
         }
 
-        let Some((len, _)) = self.effect.rx.receive_from(&mut self.buffer) else {
+        let Some((len, _)) = self.common.rx.receive_from(&mut self.buffer) else {
             return false;
         };
         'rx: {
@@ -107,16 +94,16 @@ impl Receiver for Client {
 impl Client {
     fn do_send(&mut self) {
         let request = Request {
-            client_id: self.id,
+            client_id: self.common.id,
             request_number: self.request_number,
             op: self.op.clone().unwrap(),
-            addr: self.effect.rx_addr,
+            addr: self.common.rx_addr,
         };
-        self.effect.tx.send_to(
+        self.common.tx.send_to(
             &bincode::options().serialize(&request).unwrap(),
-            self.config.replica[0],
+            self.common.config.replica[0],
         );
-        self.resend_instant = Some(self.effect.clock.now() + Duration::from_millis(10));
+        self.resend_instant = Some(self.common.clock.now() + Duration::from_millis(10));
     }
 }
 
@@ -145,7 +132,7 @@ pub struct EffectThread {
 }
 
 impl Replica {
-    pub fn new(args: ReplicaArgs) -> Self {
+    pub fn new(common: ReplicaCommon) -> Self {
         let message_channel = crossbeam_channel::bounded(1024);
         let effect_channel = crossbeam_channel::bounded(1024);
         Self {
@@ -155,13 +142,13 @@ impl Replica {
                 effect_channel: effect_channel.0,
             },
             listen: ListenThread {
-                rx: args.rx,
+                rx: common.rx,
                 buffer: [0; 1500],
                 message_channel: message_channel.0,
             },
-            effect: (0..args.n_effect)
+            effect: (0..common.n_effect)
                 .map(|_| EffectThread {
-                    tx: args.tx.clone(),
+                    tx: common.tx.clone(),
                     main_channel: effect_channel.1.clone(),
                 })
                 .collect::<Vec<_>>()
@@ -178,7 +165,7 @@ impl Replica {
     }
 }
 
-impl Receiver for Replica {
+impl State for Replica {
     fn poll(&mut self) -> bool {
         let mut poll_again = Vec::new();
         poll_again.push(self.listen.poll());
@@ -188,7 +175,7 @@ impl Receiver for Replica {
     }
 }
 
-impl Receiver for ListenThread {
+impl State for ListenThread {
     fn poll(&mut self) -> bool {
         let Some((len, _)) = self.rx.receive_from(&mut self.buffer) else {
             return false;
@@ -202,7 +189,7 @@ impl Receiver for ListenThread {
     }
 }
 
-impl Receiver for MainThread {
+impl State for MainThread {
     fn poll(&mut self) -> bool {
         if let Ok(message) = self.message_channel.try_recv() {
             self.handle_request(message);
@@ -239,7 +226,7 @@ impl MainThread {
     }
 }
 
-impl Receiver for EffectThread {
+impl State for EffectThread {
     fn poll(&mut self) -> bool {
         if let Ok((dest, message)) = self.main_channel.try_recv() {
             self.tx

@@ -9,6 +9,8 @@ pub struct Config {
     pub f: usize,
     pub replica: Box<[SocketAddr]>,
 }
+/// A serializable version of `Config` so we don't need to derive `Serialize`
+/// for `Config` and add serde into dependencies.
 pub type Config_ = (usize, Box<[SocketAddr]>);
 impl From<Config> for Config_ {
     fn from(config: Config) -> Self {
