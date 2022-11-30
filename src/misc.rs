@@ -15,6 +15,7 @@ pub fn bind_core() -> usize {
     id
 }
 
+// FIXME ensure unique id when spawn clients on multiple machines
 pub fn alloc_client_id() -> u16 {
     static ID: AtomicU16 = AtomicU16::new(1);
     ID.fetch_add(1, Ordering::SeqCst)

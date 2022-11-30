@@ -1,52 +1,59 @@
 use std::{
+    mem::take,
     net::UdpSocket,
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{spawn, JoinHandle},
 };
-
-use nix::unistd::gettid;
 
 use crate::{
     misc::bind_core,
+    receiver::{Deploy, ReplicaArgs},
     transport::{Config, RxChannel, TxChannel},
-    unreplicated, EffectRunner, Receiver,
+    Receiver,
 };
 
-pub struct Driver<T> {
-    replica: T,
+#[derive(Default)]
+pub struct Driver {
+    threads: Vec<JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
 }
 
-impl Driver<unreplicated::Replica> {
-    pub fn new(config: Arc<Config>, i: usize, n_runner_thread: usize) -> Self {
-        let (tx, rx) = mpsc::sync_channel(64);
-        let socket = UdpSocket::bind(config.replica[i]).unwrap();
-        socket.set_nonblocking(true).unwrap();
-        let rx_channel = Arc::new(Mutex::new(RxChannel::Udp(socket.try_clone().unwrap())));
-        let new_context = || unreplicated::ReplicaEffect {
-            tx: TxChannel::Udp(socket.try_clone().unwrap()),
-            rx: rx_channel.clone(),
-            buffer: [0; 1500],
-            message_channel: tx.clone(),
-        };
-        let runner = if n_runner_thread != 0 {
-            EffectRunner::new((0..n_runner_thread).map(|_| new_context()))
-        } else {
-            EffectRunner::Inline(new_context())
-        };
-        Self {
-            replica: unreplicated::Replica::new(config, runner, rx),
+impl Deploy for Driver {
+    fn deploy(&mut self, mut receiver: impl Receiver + Send + 'static) {
+        let shutdown = self.shutdown.clone();
+        self.threads.push(spawn(move || {
+            bind_core();
+            while !shutdown.load(Ordering::SeqCst) {
+                receiver.poll();
+            }
+        }))
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if !self.shutdown.swap(true, Ordering::SeqCst) {
+            println!("! Implicitly shutdown replica threads on driver dropping");
+        }
+        for thread in take(&mut self.threads) {
+            thread.join().unwrap()
         }
     }
 }
 
-impl<T> Driver<T> {
-    pub fn run(&mut self)
-    where
-        T: Receiver,
-    {
-        let core_id = bind_core();
-        println!("* Replica start: Core {core_id} Thread {}", gettid());
-        loop {
-            self.replica.poll();
+impl Driver {
+    pub fn args(config: Arc<Config>, i: usize, app: (), n_effect: usize) -> ReplicaArgs {
+        let socket = UdpSocket::bind(config.replica[i]).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        ReplicaArgs {
+            tx: TxChannel::Udp(socket.try_clone().unwrap()),
+            rx: RxChannel::Udp(socket),
+            n_effect,
+            id: i,
+            app,
         }
     }
 }

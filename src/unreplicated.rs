@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
+    convert::identity,
     net::SocketAddr,
-    sync::{mpsc, Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -9,10 +10,10 @@ use bincode::Options;
 use message::{Reply, Request};
 
 use crate::{
-    effect_runner::EffectContext,
     misc::alloc_client_id,
+    receiver::{Deploy, ReplicaArgs},
     transport::{Clock, Config, RxChannel, TxChannel},
-    EffectRunner, Receiver,
+    Receiver,
 };
 
 pub struct Client {
@@ -61,13 +62,13 @@ impl crate::Client for Client {
     fn take_result(&mut self) -> Option<Box<[u8]>> {
         self.result.take()
     }
-}
 
-impl Receiver for Client {
     fn poll_at(&self) -> Option<Instant> {
         self.resend_instant
     }
+}
 
+impl Receiver for Client {
     fn poll(&mut self) -> bool {
         if self
             .resend_instant
@@ -120,22 +121,76 @@ impl Client {
 }
 
 pub struct Replica {
+    main: MainThread,
+    listen: ListenThread,
+    effect: Box<[EffectThread]>,
+}
+
+pub struct MainThread {
     // app
     client_table: HashMap<u16, Reply>,
-    runner: EffectRunner<ReplicaEffect>,
-    message_channel: mpsc::Receiver<Request>,
+    message_channel: crossbeam_channel::Receiver<Request>,
+    effect_channel: crossbeam_channel::Sender<(SocketAddr, Reply)>,
 }
 
-pub struct ReplicaEffect {
-    pub tx: TxChannel,
-    pub rx: Arc<Mutex<RxChannel>>,
-    pub buffer: [u8; 1500],
-    pub message_channel: mpsc::SyncSender<Request>,
+pub struct ListenThread {
+    rx: RxChannel,
+    buffer: [u8; 1500],
+    message_channel: crossbeam_channel::Sender<Request>,
 }
 
-impl EffectContext for ReplicaEffect {
-    fn idle_poll(&mut self) -> bool {
-        let Some((len, _)) = self.rx.try_lock().ok().and_then(|mut rx| rx.receive_from(&mut self.buffer)) else {
+pub struct EffectThread {
+    tx: TxChannel,
+    main_channel: crossbeam_channel::Receiver<(SocketAddr, Reply)>,
+}
+
+impl Replica {
+    pub fn new(args: ReplicaArgs) -> Self {
+        let message_channel = crossbeam_channel::bounded(1024);
+        let effect_channel = crossbeam_channel::bounded(1024);
+        Self {
+            main: MainThread {
+                client_table: Default::default(),
+                message_channel: message_channel.1,
+                effect_channel: effect_channel.0,
+            },
+            listen: ListenThread {
+                rx: args.rx,
+                buffer: [0; 1500],
+                message_channel: message_channel.0,
+            },
+            effect: (0..args.n_effect)
+                .map(|_| EffectThread {
+                    tx: args.tx.clone(),
+                    main_channel: effect_channel.1.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    pub fn deploy(self, driver: &mut impl Deploy) {
+        driver.deploy(self.main);
+        driver.deploy(self.listen);
+        for thread in Vec::from(self.effect) {
+            driver.deploy(thread);
+        }
+    }
+}
+
+impl Receiver for Replica {
+    fn poll(&mut self) -> bool {
+        let mut poll_again = Vec::new();
+        poll_again.push(self.listen.poll());
+        poll_again.push(self.main.poll());
+        poll_again.extend(self.effect.iter_mut().map(|thread| thread.poll()));
+        poll_again.into_iter().any(identity)
+    }
+}
+
+impl Receiver for ListenThread {
+    fn poll(&mut self) -> bool {
+        let Some((len, _)) = self.rx.receive_from(&mut self.buffer) else {
             return false;
         };
         let request = bincode::options()
@@ -147,37 +202,18 @@ impl EffectContext for ReplicaEffect {
     }
 }
 
-impl Replica {
-    pub fn new(
-        config: Arc<Config>,
-        runner: EffectRunner<ReplicaEffect>,
-        message_channel: mpsc::Receiver<Request>,
-    ) -> Self {
-        assert_eq!(config.f, 0);
-        Self {
-            client_table: HashMap::new(),
-            runner,
-            message_channel,
-        }
-    }
-}
-
-impl Receiver for Replica {
-    fn poll_at(&self) -> Option<Instant> {
-        None
-    }
-
+impl Receiver for MainThread {
     fn poll(&mut self) -> bool {
         if let Ok(message) = self.message_channel.try_recv() {
             self.handle_request(message);
             true
         } else {
-            self.runner.run_idle()
+            false
         }
     }
 }
 
-impl Replica {
+impl MainThread {
     fn handle_request(&mut self, message: Request) {
         if let Some(reply) = self.client_table.get(&message.client_id) {
             if reply.request_number > message.request_number {
@@ -185,13 +221,10 @@ impl Replica {
                 return;
             }
             if reply.request_number == message.request_number {
-                let reply = reply.clone();
-                self.runner.run(move |effect| {
-                    effect
-                        .tx
-                        .send_to(&bincode::options().serialize(&reply).unwrap(), message.addr);
-                });
                 println!("* resend replied request");
+                self.effect_channel
+                    .send((message.addr, reply.clone()))
+                    .unwrap();
                 return;
             }
         }
@@ -202,10 +235,18 @@ impl Replica {
             result,
         };
         self.client_table.insert(message.client_id, reply.clone());
-        self.runner.run(move |effect| {
-            effect
-                .tx
-                .send_to(&bincode::options().serialize(&reply).unwrap(), message.addr);
-        });
+        self.effect_channel.send((message.addr, reply)).unwrap();
+    }
+}
+
+impl Receiver for EffectThread {
+    fn poll(&mut self) -> bool {
+        if let Ok((dest, message)) = self.main_channel.try_recv() {
+            self.tx
+                .send_to(&bincode::options().serialize(&message).unwrap(), dest);
+            true
+        } else {
+            false
+        }
     }
 }

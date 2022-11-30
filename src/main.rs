@@ -45,10 +45,7 @@ fn main() {
         //     command.config.secret_keys.push(secret_key);
         // }
 
-        command.replica = Some(ReplicaCommand {
-            id: 0,
-            n_runner_thread: 4,
-        });
+        command.replica = Some(ReplicaCommand { id: 0, n_effect: 3 });
         command.client = None;
         for host in [
             "nsl-node1.d1.comp.nus.edu.sg",
@@ -83,14 +80,15 @@ fn main() {
         .unwrap();
     let config = Arc::new(TransportConfig::from(command.config));
     match (command.replica, command.client) {
-        (Some(replica), None) => match command.protocol {
-            ProtocolMode::Unreplicated => bench_replica::Driver::<unreplicated::Replica>::new(
-                config,
-                replica.id,
-                replica.n_runner_thread,
-            )
-            .run(),
-        },
+        (Some(replica), None) => {
+            let mut driver = bench_replica::Driver::default();
+            let args = bench_replica::Driver::args(config, replica.id, (), replica.n_effect);
+            match command.protocol {
+                ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut driver),
+            }
+            // TODO explicit shutdown
+            sleep(Duration::from_secs(3600));
+        }
         (None, Some(client)) => {
             let n_result = Arc::new(AtomicU32::new(0));
             let handles = (0..client.n_thread.get())

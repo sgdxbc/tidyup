@@ -43,7 +43,7 @@ pub enum ProtocolMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaCommand {
     pub id: usize,
-    pub n_runner_thread: usize,
+    pub n_effect: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
