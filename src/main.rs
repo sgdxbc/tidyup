@@ -65,8 +65,8 @@ fn main() {
         sleep(Duration::from_secs(1));
         command.replica = None;
         command.client = Some(ClientCommand {
-            n_client: 60.try_into().unwrap(),
-            n_thread: 8.try_into().unwrap(),
+            n_client: 30.try_into().unwrap(),
+            n_thread: 16.try_into().unwrap(),
             ip: [10, 0, 0, 4].into(),
             n_report: 10.try_into().unwrap(),
         });

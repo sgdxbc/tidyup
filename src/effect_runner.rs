@@ -1,12 +1,9 @@
 use std::{
-    iter::{once, repeat_with},
     mem::{replace, take},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
     thread::{spawn, JoinHandle},
 };
+
+use crossbeam_channel::TryRecvError;
 
 use crate::misc::bind_core;
 
@@ -34,9 +31,8 @@ use crate::misc::bind_core;
 /// exprience this choice is better for this project's use case.
 pub enum EffectRunner<T> {
     ThreadPool {
-        idle_bits: Arc<AtomicU64>,
-        slots: Arc<[Mutex<Box<dyn FnOnce(&mut T) + Send>>]>,
         handles: Box<[JoinHandle<()>]>,
+        sender: crossbeam_channel::Sender<Box<dyn FnOnce(&mut T) + Send>>,
     },
     Inline(T),
 }
@@ -48,72 +44,43 @@ pub trait EffectContext {
 }
 
 impl<T> EffectRunner<T> {
-    const SHUTDOWN: u64 = 0;
-
     pub fn new(context_iter: impl ExactSizeIterator<Item = T>) -> Self
     where
         T: EffectContext + Send + 'static,
     {
         assert_ne!(context_iter.len(), 0);
         assert!(context_iter.len() < u64::BITS as _);
-        let idle_bits = Arc::new(AtomicU64::new(
-            (0..context_iter.len() as u32)
-                // the always-set bit before shutdown
-                .chain(once(u64::BITS - 1))
-                .map(|i| 1 << i)
-                .sum(),
-        ));
-        let slots = Arc::from(
-            repeat_with(|| Mutex::new(Box::new(|_: &mut _| unreachable!()) as _))
-                .take(context_iter.len())
-                .collect::<Vec<_>>(),
-        );
+
+        let (sender, receiver) = crossbeam_channel::bounded(1024);
         Self::ThreadPool {
             handles: context_iter
                 .enumerate()
                 .map(|(i, context)| {
-                    let idle_bits = Arc::clone(&idle_bits);
-                    let slots = Arc::clone(&slots);
-                    spawn(move || Self::worker_loop(i, context, idle_bits, slots))
+                    let receiver = receiver.clone();
+                    spawn(move || Self::worker_loop(i, context, receiver))
                 })
                 .collect::<Vec<_>>()
                 .into(),
-            slots,
-            idle_bits,
+            sender,
         }
     }
 
     fn worker_loop(
-        i: usize,
+        _i: usize,
         mut context: T,
-        idle_bits: Arc<AtomicU64>,
-        slots: Arc<[Mutex<Box<dyn FnOnce(&mut T) + Send>>]>,
+        receiver: crossbeam_channel::Receiver<Box<dyn FnOnce(&mut T) + Send>>,
     ) where
         T: EffectContext,
     {
         bind_core();
 
-        let mut bits;
-        while {
-            while {
-                bits = idle_bits.load(Ordering::SeqCst);
-                bits & (1 << i) != 0
-            } {
-                context.idle_poll();
-            }
-            bits != Self::SHUTDOWN
-        } {
-            replace(
-                &mut *slots[i].try_lock().unwrap(),
-                Box::new(|_| unreachable!()),
-            )(&mut context);
-            while let Err(bits_) = idle_bits.compare_exchange_weak(
-                bits,
-                bits | (1 << i),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                bits = bits_;
+        loop {
+            match receiver.try_recv() {
+                Ok(effect) => effect(&mut context),
+                Err(TryRecvError::Empty) => {
+                    context.idle_poll();
+                }
+                Err(TryRecvError::Disconnected) => return,
             }
         }
     }
@@ -124,25 +91,9 @@ impl<T> EffectRunner<T> {
                 effect(context);
                 0
             }
-            Self::ThreadPool {
-                idle_bits, slots, ..
-            } => {
-                let (mut bits, mut i);
-                while {
-                    bits = idle_bits.load(Ordering::SeqCst);
-                    i = bits.trailing_zeros();
-                    i == u64::BITS - 1
-                } {}
-                *slots[i as usize].try_lock().unwrap() = Box::new(effect);
-                while let Err(bits_) = idle_bits.compare_exchange_weak(
-                    bits,
-                    bits ^ (1 << i),
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    bits = bits_
-                }
-                i
+            Self::ThreadPool { sender, .. } => {
+                sender.send(Box::new(effect)).unwrap();
+                0
             }
         }
     }
@@ -161,10 +112,11 @@ impl<T> EffectRunner<T> {
 
 impl<T> Drop for EffectRunner<T> {
     fn drop(&mut self) {
-        let Self::ThreadPool { idle_bits, handles , ..} = self else {
+        let Self::ThreadPool {  handles , sender, ..} = self else {
             return;
         };
-        idle_bits.store(Self::SHUTDOWN, Ordering::SeqCst);
+        let (temp_sender, _) = crossbeam_channel::bounded(0);
+        drop(replace(sender, temp_sender));
         for handle in Vec::from(take(handles)).into_iter() {
             handle.join().unwrap()
         }
