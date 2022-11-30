@@ -8,6 +8,6 @@ pub mod driver {
     pub mod bench_replica;
 }
 
-pub use effect_runner::EffectRunner;
+pub use effect_runner::{EffectContext, EffectRunner};
 pub(crate) use receiver::{Client, Receiver};
 pub use transport::{Config as TransportConfig, Config_ as TransportConfig_};
