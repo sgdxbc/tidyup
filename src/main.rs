@@ -15,7 +15,7 @@ use message::{AppMode, ClientCommand, Command, ProtocolMode, ReplicaCommand};
 
 use tidyup_v2::{
     driver::{bench_client, bench_replica},
-    unreplicated, TransportConfig, TransportConfig_,
+    unreplicated, App, TransportConfig, TransportConfig_,
 };
 
 fn main() {
@@ -81,8 +81,11 @@ fn main() {
     let config = Arc::new(TransportConfig::from(command.config));
     match (command.replica, command.client) {
         (Some(replica), None) => {
+            let app = match command.app {
+                AppMode::Null => App::Null,
+            };
             let mut driver = bench_replica::Driver::default();
-            let args = bench_replica::Driver::args(config, replica.id, (), replica.n_effect);
+            let args = bench_replica::Driver::args(config, replica.id, app, replica.n_effect);
             match command.protocol {
                 ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut driver),
             }

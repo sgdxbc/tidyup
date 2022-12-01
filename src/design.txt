@@ -33,17 +33,22 @@ case of simulation, multiple receiver types means multiple closure types, each
 accepts different "`this`". It seems necessary to switch to poll mode to 
 workaround callback-related problems.
 
-Short summary.
-* For replicas, they should be able to switch between offloading mode and inline
-mode, for benchmark and simulation respectively.
-* For replicas, they should be able to switch between exclusive mode and 
-cooperative mode, for benchmark and simulation respectively.
-* For everything, they should be able to receive message and timer notification
-from both benchmark and simulated environment. They should also send message and
-manage timers in such fashion.
-* We want a poll-mode interface to avoid receiver types appear in their 
-interface method signatures. This also means receivers should actively detect
-external events (as while as actively create external events) instead of 
-passively providing certain callbacks.
+About "driver". Receivers driving by transport layer is usually not a complete 
+program. In the case of client-side program, a driving logic is needed to handle 
+operation results and issue more operations if needed. In the case of test
+cases, another driving logic is needed to modify simulated network during the
+progress of protocol, e.g., partition/heal. These reaction logics are registered
+as callback into transport in specpaxos, which has several problems:
+
+* Even in C++ where closure captured is unlimited, callback-based code is hard
+to understand, unfriendly to newcomers, which is especially bad for test cases
+* Similar to timer callback, the type of driver, i.e., the set of states that
+may be accessed in driving logic, must appear in closure signature to avoid
+overlapping mutable borrowing. This is even worse than timer case, because 
+driving logic normally does not have a type
+
+To solve these problems, the transport layer may also need to switch to poll 
+mode. In fact, in current version transport layer is almost gone, some becomes
+into receivers, and some becomes into executable directly.
 
 [WIP]

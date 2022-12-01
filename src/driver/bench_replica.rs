@@ -9,10 +9,9 @@ use std::{
 };
 
 use crate::{
+    core::{Clock, Config, Deploy, ReplicaCommon, RxChannel, TxChannel},
     misc::bind_core,
-    state::{Deploy, ReplicaCommon},
-    transport::{Clock, Config, RxChannel, TxChannel},
-    State,
+    App, State,
 };
 
 #[derive(Default)]
@@ -45,7 +44,7 @@ impl Drop for Driver {
 }
 
 impl Driver {
-    pub fn args(config: Arc<Config>, i: usize, app: (), n_effect: usize) -> ReplicaCommon {
+    pub fn args(config: Arc<Config>, i: usize, app: App, n_effect: usize) -> ReplicaCommon {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
         ReplicaCommon {

@@ -9,9 +9,8 @@ use bincode::Options;
 use message::{Reply, Request};
 
 use crate::{
-    state::ClientCommon,
-    transport::{RxChannel, TxChannel},
-    ClientState, Deploy, ReplicaCommon, State,
+    core::{ClientCommon, RxChannel, TxChannel},
+    App, ClientState, Deploy, ReplicaCommon, State,
 };
 
 pub struct Client {
@@ -114,8 +113,9 @@ pub struct Replica {
 }
 
 pub struct MainThread {
-    // app
+    app: App,
     client_table: HashMap<u16, Reply>,
+    op_number: u32,
     message_channel: crossbeam_channel::Receiver<Request>,
     effect_channel: crossbeam_channel::Sender<(SocketAddr, Reply)>,
 }
@@ -137,7 +137,9 @@ impl Replica {
         let effect_channel = crossbeam_channel::bounded(1024);
         Self {
             main: MainThread {
+                app: common.app,
                 client_table: Default::default(),
+                op_number: 0,
                 message_channel: message_channel.1,
                 effect_channel: effect_channel.0,
             },
@@ -215,8 +217,8 @@ impl MainThread {
                 return;
             }
         }
-        // execute app
-        let result = Box::new([]);
+        self.op_number += 1;
+        let result = self.app.execute(self.op_number, &message.op);
         let reply = Reply {
             request_number: message.request_number,
             result,

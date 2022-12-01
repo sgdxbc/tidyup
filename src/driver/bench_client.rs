@@ -14,9 +14,8 @@ use std::{
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
 
 use crate::{
+    core::{ClientCommon, Clock, Config, RxChannel, TxChannel},
     misc::{alloc_client_id, bind_core},
-    state::ClientCommon,
-    transport::{Clock, Config, RxChannel, TxChannel},
     unreplicated, ClientState,
 };
 
