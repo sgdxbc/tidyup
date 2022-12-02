@@ -11,7 +11,7 @@ use std::{
 use nix::sys::signal::{signal, SigHandler, Signal::SIGINT};
 
 use crate::{
-    core::{Clock, Config, Deploy, ReplicaCommon, RxChannel, TxChannel},
+    core::{Clock, Deploy, ReplicaCommon, RxChannel, TransportConfig, TxChannel},
     misc::bind_core,
     App, State,
 };
@@ -46,7 +46,12 @@ impl Drop for Program {
 }
 
 impl Program {
-    pub fn args(config: Arc<Config>, i: usize, app: App, n_effect: usize) -> ReplicaCommon {
+    pub fn args(
+        config: Arc<TransportConfig>,
+        i: usize,
+        app: App,
+        n_effect: usize,
+    ) -> ReplicaCommon {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
         ReplicaCommon {

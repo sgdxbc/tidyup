@@ -13,7 +13,7 @@ use std::{
 use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlags, EpollOp};
 
 use crate::{
-    core::{ClientCommon, Clock, Config, RxChannel, TxChannel},
+    core::{ClientCommon, Clock, RxChannel, TransportConfig, TxChannel},
     misc::{alloc_client_id, bind_core},
     unreplicated, ClientState, OptionInstant,
 };
@@ -32,7 +32,7 @@ pub struct Program<T> {
 impl Program<unreplicated::Client> {
     pub fn new(
         n_client: NonZeroUsize,
-        config: Arc<Config>,
+        config: Arc<TransportConfig>,
         ip: IpAddr,
         run_duration: Duration,
         n_result: Arc<AtomicU32>,

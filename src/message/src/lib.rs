@@ -20,8 +20,14 @@ pub struct Reply {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Command<C> {
-    pub config: C,
+pub struct TransportConfig {
+    pub f: usize,
+    pub replica: Box<[SocketAddr]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Command {
+    pub config: TransportConfig,
     pub app: AppMode,
     pub protocol: ProtocolMode,
     pub replica: Option<ReplicaCommand>,

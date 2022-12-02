@@ -6,6 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use message::TransportConfig;
+
 use crate::App;
 
 pub trait State {
@@ -38,32 +40,11 @@ pub struct ReplicaCommon {
 
 pub struct ClientCommon {
     pub id: u16,
-    pub config: Arc<Config>,
+    pub config: Arc<TransportConfig>,
     pub tx: TxChannel,
     pub rx: RxChannel,
     pub rx_addr: SocketAddr,
     pub clock: Clock,
-}
-
-pub struct Config {
-    pub f: usize,
-    pub replica: Box<[SocketAddr]>,
-}
-/// A serializable version of `Config` so we don't need to derive `Serialize`
-/// for `Config` and add serde into dependencies.
-pub type Config_ = (usize, Box<[SocketAddr]>);
-impl From<Config> for Config_ {
-    fn from(config: Config) -> Self {
-        (config.f, config.replica)
-    }
-}
-impl From<Config_> for Config {
-    fn from(config: Config_) -> Self {
-        Self {
-            f: config.0,
-            replica: config.1,
-        }
-    }
 }
 
 pub enum TxChannel {

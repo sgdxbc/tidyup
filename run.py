@@ -27,7 +27,7 @@ async def main():
     wait_tasks = [spawn(remote(host, "[C]")) for host in wait_nodes]
 
     await sleep(2)
-    p = await proc("./target/release/tidyup-v2", "command")
+    p = await proc("cargo", "run", "--quiet",  "--package", "run")
     await p.wait()
 
     await gather(*wait_tasks)
