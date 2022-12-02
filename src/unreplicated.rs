@@ -1,16 +1,11 @@
-use std::{
-    collections::HashMap,
-    convert::identity,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, convert::identity, net::SocketAddr, time::Duration};
 
 use bincode::Options;
 use message::{Reply, Request};
 
 use crate::{
     core::{ClientCommon, RxChannel, TxChannel},
-    App, ClientState, Deploy, ReplicaCommon, State,
+    App, ClientState, Deploy, OptionInstant, ReplicaCommon, State,
 };
 
 pub struct Client {
@@ -19,7 +14,7 @@ pub struct Client {
     op: Option<Box<[u8]>>,
     result: Option<Box<[u8]>>,
 
-    resend_instant: Option<Instant>,
+    resend_instant: OptionInstant,
     buffer: [u8; 1500],
 }
 
@@ -30,7 +25,7 @@ impl Client {
             op: None,
             result: None,
             common,
-            resend_instant: None,
+            resend_instant: Default::default(),
             buffer: [0; 1500],
         }
     }
@@ -49,18 +44,14 @@ impl ClientState for Client {
         self.result.take()
     }
 
-    fn poll_at(&self) -> Option<Instant> {
+    fn poll_at(&self) -> OptionInstant {
         self.resend_instant
     }
 }
 
 impl State for Client {
     fn poll(&mut self) -> bool {
-        if self
-            .resend_instant
-            .filter(|&instant| instant <= self.common.clock.now())
-            .is_some()
-        {
+        if self.resend_instant <= self.common.clock.now().into() {
             println!(
                 "! Resend: Client {} Request {}",
                 self.common.id, self.request_number
@@ -84,7 +75,7 @@ impl State for Client {
             }
             self.op = None;
             self.result = Some(message.result);
-            self.resend_instant = None;
+            self.resend_instant = Default::default();
         }
         true
     }
@@ -102,7 +93,7 @@ impl Client {
             &bincode::options().serialize(&request).unwrap(),
             self.common.config.replica[0],
         );
-        self.resend_instant = Some(self.common.clock.now() + Duration::from_millis(10));
+        self.resend_instant = self.common.clock.after(Duration::from_millis(10));
     }
 }
 
@@ -116,6 +107,7 @@ pub struct MainThread {
     app: App,
     client_table: HashMap<u16, Reply>,
     op_number: u32,
+    log: Vec<Request>,
     message_channel: crossbeam_channel::Receiver<Request>,
     effect_channel: crossbeam_channel::Sender<(SocketAddr, Reply)>,
 }
@@ -140,6 +132,7 @@ impl Replica {
                 app: common.app,
                 client_table: Default::default(),
                 op_number: 0,
+                log: Default::default(),
                 message_channel: message_channel.1,
                 effect_channel: effect_channel.0,
             },
@@ -217,6 +210,7 @@ impl MainThread {
                 return;
             }
         }
+        self.log.push(message.clone());
         self.op_number += 1;
         let result = self.app.execute(self.op_number, &message.op);
         let reply = Reply {

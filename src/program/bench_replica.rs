@@ -3,10 +3,12 @@ use std::{
     net::UdpSocket,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::{spawn, JoinHandle},
 };
+
+use nix::sys::signal::{signal, SigHandler, Signal::SIGINT};
 
 use crate::{
     core::{Clock, Config, Deploy, ReplicaCommon, RxChannel, TxChannel},
@@ -15,12 +17,12 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct Driver {
+pub struct Program {
     threads: Vec<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
 }
 
-impl Deploy for Driver {
+impl Deploy for Program {
     fn deploy(&mut self, mut state: impl State + Send + 'static) {
         let shutdown = self.shutdown.clone();
         self.threads.push(spawn(move || {
@@ -32,7 +34,7 @@ impl Deploy for Driver {
     }
 }
 
-impl Drop for Driver {
+impl Drop for Program {
     fn drop(&mut self) {
         if !self.shutdown.swap(true, Ordering::SeqCst) {
             println!("! Implicitly shutdown replica threads on driver dropping");
@@ -43,7 +45,7 @@ impl Drop for Driver {
     }
 }
 
-impl Driver {
+impl Program {
     pub fn args(config: Arc<Config>, i: usize, app: App, n_effect: usize) -> ReplicaCommon {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
@@ -54,6 +56,25 @@ impl Driver {
             id: i,
             app,
             clock: Clock::Real,
+        }
+    }
+
+    pub fn run_until_interrupt(&mut self) {
+        assert!(!self.shutdown.load(Ordering::SeqCst));
+        static FLAG: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+        extern "C" fn on_interrupt(_: i32) {
+            *FLAG.0.lock().unwrap() = true;
+            FLAG.1.notify_one();
+        }
+        unsafe { signal(SIGINT, SigHandler::Handler(on_interrupt)) }.unwrap();
+        let _unused = FLAG
+            .1
+            .wait_while(FLAG.0.lock().unwrap(), |&mut interrupted| !interrupted)
+            .unwrap();
+        unsafe { signal(SIGINT, SigHandler::SigDfl) }.unwrap();
+        self.shutdown.store(true, Ordering::SeqCst);
+        for thread in take(&mut self.threads) {
+            thread.join().unwrap();
         }
     }
 }

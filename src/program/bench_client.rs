@@ -1,5 +1,4 @@
 use std::{
-    cmp::Reverse,
     collections::BTreeSet,
     net::{IpAddr, UdpSocket},
     num::NonZeroUsize,
@@ -16,21 +15,21 @@ use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlag
 use crate::{
     core::{ClientCommon, Clock, Config, RxChannel, TxChannel},
     misc::{alloc_client_id, bind_core},
-    unreplicated, ClientState,
+    unreplicated, ClientState, OptionInstant,
 };
 
-pub struct Driver<T> {
+pub struct Program<T> {
     clients: Box<[T]>,
     epoll_fd: RawFd,
-    // client => instant and instant => client timer tables
-    poll_instants: Box<[Option<Instant>]>,
-    instant_polls: BTreeSet<(Option<Reverse<Instant>>, usize)>,
+    // client => instant and (instant, client) timer tables
+    poll_instants: Box<[OptionInstant]>,
+    instant_polls: BTreeSet<(OptionInstant, usize)>,
 
     run_duration: Duration,
     n_result: Arc<AtomicU32>,
 }
 
-impl Driver<unreplicated::Client> {
+impl Program<unreplicated::Client> {
     pub fn new(
         n_client: NonZeroUsize,
         config: Arc<Config>,
@@ -61,19 +60,21 @@ impl Driver<unreplicated::Client> {
                 unreplicated::Client::new(common)
             })
             .collect();
-        let poll_instants = vec![None; n_client.get()].into_boxed_slice();
+        let poll_instants = vec![Default::default(); n_client.get()].into_boxed_slice();
         Self {
             clients,
             epoll_fd,
             poll_instants,
-            instant_polls: (0..n_client.get()).map(|i| (None, i)).collect(),
+            instant_polls: (0..n_client.get())
+                .map(|i| (Default::default(), i))
+                .collect(),
             run_duration,
             n_result,
         }
     }
 }
 
-impl<T> Driver<T> {
+impl<T> Program<T> {
     pub fn run(&mut self)
     where
         T: ClientState,
@@ -96,8 +97,8 @@ impl<T> Driver<T> {
             now = Instant::now();
             now - start < self.run_duration
         } {
-            let &(poll_at, i) = self.instant_polls.iter().rev().next().unwrap();
-            if poll_at.filter(|&Reverse(instant)| instant < now).is_some() {
+            let &(poll_at, i) = self.instant_polls.iter().next().unwrap();
+            if poll_at < Default::default() {
                 while self.poll_client(i) {} // is this possible to live lock?
                 self.update_timer(i);
             }
@@ -137,11 +138,9 @@ impl<T> Driver<T> {
         if poll_at == self.poll_instants[i] {
             return;
         }
-        let removed = self
-            .instant_polls
-            .remove(&(self.poll_instants[i].map(Reverse), i));
+        let removed = self.instant_polls.remove(&(self.poll_instants[i], i));
         assert!(removed);
-        self.instant_polls.insert((poll_at.map(Reverse), i));
+        self.instant_polls.insert((poll_at, i));
         self.poll_instants[i] = poll_at;
     }
 }

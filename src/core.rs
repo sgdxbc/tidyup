@@ -1,8 +1,9 @@
 use std::{
+    cmp::Reverse,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
     sync::{mpsc, Arc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::App;
@@ -21,8 +22,10 @@ where
 {
     fn invoke(&mut self, op: Box<[u8]>);
     fn take_result(&mut self) -> Option<Box<[u8]>>;
-    fn poll_at(&self) -> Option<Instant>;
+    fn poll_at(&self) -> OptionInstant;
 }
+
+pub type OptionInstant = Reverse<Option<Reverse<Instant>>>;
 
 pub struct ReplicaCommon {
     pub tx: TxChannel,
@@ -113,9 +116,16 @@ pub enum Clock {
 }
 
 impl Clock {
-    pub fn now(&self) -> Instant {
+    pub fn now(&self) -> OptionInstant {
         match self {
-            Self::Real => Instant::now(),
+            Self::Real => Reverse(Some(Reverse(Instant::now()))),
+            Self::Simulated(_) => todo!(),
+        }
+    }
+
+    pub fn after(&self, duration: Duration) -> OptionInstant {
+        match self {
+            Self::Real => Reverse(Some(Reverse(Instant::now() + duration))),
             Self::Simulated(_) => todo!(),
         }
     }

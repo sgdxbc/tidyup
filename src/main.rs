@@ -14,7 +14,7 @@ use bincode::Options;
 use message::{AppMode, ClientCommand, Command, ProtocolMode, ReplicaCommand};
 
 use tidyup_v2::{
-    driver::{bench_client, bench_replica},
+    program::{bench_client, bench_replica},
     unreplicated, App, TransportConfig, TransportConfig_,
 };
 
@@ -84,13 +84,12 @@ fn main() {
             let app = match command.app {
                 AppMode::Null => App::Null,
             };
-            let mut driver = bench_replica::Driver::default();
-            let args = bench_replica::Driver::args(config, replica.id, app, replica.n_effect);
+            let mut program = bench_replica::Program::default();
+            let args = bench_replica::Program::args(config, replica.id, app, replica.n_effect);
             match command.protocol {
-                ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut driver),
+                ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut program),
             }
-            // TODO explicit shutdown
-            sleep(Duration::from_secs(3600));
+            program.run_until_interrupt();
         }
         (None, Some(client)) => {
             let n_result = Arc::new(AtomicU32::new(0));
@@ -101,7 +100,7 @@ fn main() {
                     let n_result = n_result.clone();
                     spawn(move || match command.protocol {
                         ProtocolMode::Unreplicated => {
-                            bench_client::Driver::<unreplicated::Client>::new(
+                            bench_client::Program::<unreplicated::Client>::new(
                                 client.n_client,
                                 config,
                                 client.ip,
