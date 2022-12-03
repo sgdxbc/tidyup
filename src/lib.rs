@@ -1,6 +1,7 @@
 mod app;
 mod core;
 pub(crate) mod misc;
+pub mod pbft;
 pub mod unreplicated;
 pub mod program {
     pub mod bench_client;

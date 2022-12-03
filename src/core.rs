@@ -14,8 +14,21 @@ pub trait State {
     fn poll(&mut self) -> bool;
 }
 
+pub trait SharedState {
+    fn shared_poll(&self) -> bool;
+}
+
+impl<T: SharedState> State for T {
+    fn poll(&mut self) -> bool {
+        self.shared_poll()
+    }
+}
+
 pub trait Deploy {
     fn deploy(&mut self, state: impl State + Send + 'static);
+    fn deploy_shared(&mut self, shared_state: impl SharedState + Send + Sync + 'static) {
+        self.deploy(shared_state)
+    }
 }
 
 pub trait ClientState
@@ -30,12 +43,13 @@ where
 pub type OptionInstant = Reverse<Option<Reverse<Instant>>>;
 
 pub struct ReplicaCommon {
+    pub id: usize,
+    pub config: Arc<TransportConfig>,
+    pub app: App,
     pub tx: TxChannel,
     pub rx: RxChannel,
-    pub n_effect: usize,
-    pub id: usize,
-    pub app: App,
     pub clock: Clock,
+    pub n_effect: usize,
 }
 
 pub struct ClientCommon {
@@ -49,7 +63,7 @@ pub struct ClientCommon {
 
 pub enum TxChannel {
     Udp(UdpSocket),
-    Simulated(mpsc::Sender<()>), //
+    Simulated(()), //
 }
 
 impl Clone for TxChannel {
@@ -62,7 +76,7 @@ impl Clone for TxChannel {
 }
 
 impl TxChannel {
-    pub fn send_to(&mut self, payload: &[u8], dest: SocketAddr) -> usize {
+    pub fn send_to(&self, payload: &[u8], dest: SocketAddr) -> usize {
         match self {
             Self::Udp(socket) => socket.send_to(payload, dest).unwrap(),
             Self::Simulated(_) => todo!(),

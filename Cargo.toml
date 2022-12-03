@@ -11,6 +11,7 @@ bincode = "1.3.3"
 crossbeam-channel = "0.5.6"
 message = { version = "0.1.0", path = "src/message" }
 nix = "0.25.0"
+secp256k1 = { version = "0.24.1", features = ["bitcoin_hashes"] }
 
 [profile.release]
 panic = "abort"

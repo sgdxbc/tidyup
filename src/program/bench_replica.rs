@@ -55,6 +55,7 @@ impl Program {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
         ReplicaCommon {
+            config,
             tx: TxChannel::Udp(socket.try_clone().unwrap()),
             rx: RxChannel::Udp(socket),
             n_effect,

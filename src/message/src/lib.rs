@@ -13,16 +13,29 @@ pub struct Request {
     pub addr: SocketAddr,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Reply {
+    // should not use default
     pub request_number: u32,
+    // should not use default
     pub result: Box<[u8]>,
+    pub replica_id: u8,
+    pub view_number: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signed<M> {
+    pub inner: M,
+    pub signature: secp256k1::ecdsa::Signature,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportConfig {
+    pub n: usize, // always == replica.len()
     pub f: usize,
     pub replica: Box<[SocketAddr]>,
+    pub public_keys: Box<[secp256k1::PublicKey]>,
+    pub secret_keys: Box<[secp256k1::SecretKey]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,3 +73,5 @@ pub struct ClientCommand {
     pub ip: IpAddr,
     pub n_report: NonZeroUsize,
 }
+
+pub mod pbft;

@@ -1,9 +1,15 @@
-use std::{io::Write, net::TcpStream, thread::sleep, time::Duration};
+use std::{io::Write, iter::repeat_with, net::TcpStream, thread::sleep, time::Duration};
 
 use bincode::Options;
 use message::{AppMode, ClientCommand, Command, ProtocolMode, ReplicaCommand, TransportConfig};
+use rand::thread_rng;
+use secp256k1::Secp256k1;
 
 fn main() {
+    let (secret_keys, public_keys) =
+        repeat_with(|| Secp256k1::new().generate_keypair(&mut thread_rng()))
+            .take(4)
+            .unzip::<_, _, Vec<_>, Vec<_>>();
     let mut command = Command {
         app: AppMode::Null,
         protocol: ProtocolMode::Unreplicated,
@@ -14,19 +20,14 @@ fn main() {
                 ([10, 0, 0, 3], 7001).into(),
                 ([10, 0, 0, 4], 7001).into(),
             ]),
+            n: 4,
             f: 0,
-            // public_keys: Vec::new(),
-            // secret_keys: Vec::new(),
+            public_keys: public_keys.into_boxed_slice(),
+            secret_keys: secret_keys.into_boxed_slice(),
         },
         client: None,
         replica: None,
     };
-    // for _ in 0..command.config.remotes.len() {
-    //     let secret_key = SecretKey::generate_secp256k1();
-    //     let public_key = PublicKey::new_secp256k1(&secret_key);
-    //     command.config.public_keys.push(public_key);
-    //     command.config.secret_keys.push(secret_key);
-    // }
 
     command.replica = Some(ReplicaCommand { id: 0, n_effect: 3 });
     command.client = None;
