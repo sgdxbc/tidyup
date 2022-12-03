@@ -27,8 +27,8 @@ fn main() {
             let app = match command.app {
                 AppMode::Null => App::Null,
             };
-            let mut program = bench_replica::Program::default();
-            let args = bench_replica::Program::args(config, replica.id, app, replica.n_effect);
+            let mut program = bench_replica::Program::new(replica.n_thread);
+            let args = bench_replica::Program::args(config, replica.id, app, replica.n_thread);
             match command.protocol {
                 ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut program),
             }

@@ -29,7 +29,7 @@ fn main() {
         replica: None,
     };
 
-    command.replica = Some(ReplicaCommand { id: 0, n_effect: 3 });
+    command.replica = Some(ReplicaCommand { id: 0, n_thread: 15 });
     command.client = None;
     for host in [
         "nsl-node1.d1.comp.nus.edu.sg",

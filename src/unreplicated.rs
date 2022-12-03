@@ -1,10 +1,10 @@
-use std::{collections::HashMap, convert::identity, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use bincode::Options;
 use message::{Reply, Request};
 
 use crate::{
-    core::{ClientCommon, RxChannel, TxChannel},
+    core::{ClientCommon, RxChannel, SharedState, TxChannel},
     App, ClientState, Deploy, OptionInstant, ReplicaCommon, State,
 };
 
@@ -99,7 +99,7 @@ impl Client {
 pub struct Replica {
     main: MainThread,
     listen: ListenThread,
-    effect: Box<[EffectThread]>,
+    effect: EffectThread,
 }
 
 struct MainThread {
@@ -140,32 +140,27 @@ impl Replica {
                 buffer: [0; 1500],
                 to_main: message_channel.0,
             },
-            effect: (0..common.n_effect)
-                .map(|_| EffectThread {
-                    tx: common.tx.clone(),
-                    ingress: effect_channel.1.clone(),
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            effect: EffectThread {
+                tx: common.tx.clone(),
+                ingress: effect_channel.1.clone(),
+            },
         }
     }
 
     pub fn deploy(self, program: &mut impl Deploy) {
         program.deploy(self.main);
         program.deploy(self.listen);
-        for thread in Vec::from(self.effect) {
-            program.deploy(thread);
-        }
+        program.deploy_shared(self.effect);
     }
 }
 
 impl State for Replica {
     fn poll(&mut self) -> bool {
-        let mut poll_again = Vec::new();
-        poll_again.push(self.listen.poll());
-        poll_again.push(self.main.poll());
-        poll_again.extend(self.effect.iter_mut().map(|thread| thread.poll()));
-        poll_again.into_iter().any(identity)
+        let mut poll_again = false;
+        poll_again |= self.listen.poll();
+        poll_again |= self.main.poll();
+        poll_again |= self.effect.poll();
+        poll_again
     }
 }
 
@@ -220,8 +215,8 @@ impl MainThread {
     }
 }
 
-impl State for EffectThread {
-    fn poll(&mut self) -> bool {
+impl SharedState for EffectThread {
+    fn shared_poll(&self) -> bool {
         if let Ok((dest, message)) = self.ingress.try_recv() {
             self.tx
                 .send_to(&bincode::options().serialize(&message).unwrap(), dest);

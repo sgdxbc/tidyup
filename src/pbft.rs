@@ -119,16 +119,6 @@ pub struct Replica {
     crypto: CryptoThread,
 }
 
-impl State for Replica {
-    fn poll(&mut self) -> bool {
-        let mut poll_again = false;
-        poll_again |= self.listen.poll();
-        poll_again |= self.crypto.poll();
-        poll_again |= self.main.poll();
-        poll_again
-    }
-}
-
 enum ToCrypto {
     Verify(ToReplica),
     SendReply(SocketAddr, Reply), // send only, reply does not need to sign
@@ -235,6 +225,16 @@ impl Replica {
     }
 }
 
+impl State for Replica {
+    fn poll(&mut self) -> bool {
+        let mut poll_again = false;
+        poll_again |= self.listen.poll();
+        poll_again |= self.crypto.poll();
+        poll_again |= self.main.poll();
+        poll_again
+    }
+}
+
 impl State for MainThread {
     fn poll(&mut self) -> bool {
         match self.ingress.try_recv() {
@@ -281,7 +281,13 @@ impl MainThread {
             todo!()
         }
         self.requests.push(message);
-        // TODO if too many concurrent proposals postpone pre-prepare
+        // tune concurrent parameter if it does not work well
+        if self.op_number < self.execute_number + 10 {
+            self.do_close_batch();
+        }
+    }
+
+    fn do_close_batch(&mut self) {
         self.op_number += 1;
         let pre_prepare = PrePrepare {
             view_number: self.view_number,
@@ -368,6 +374,9 @@ impl MainThread {
             .insert(message.inner.replica_id, message.signature);
         if entry.commit_quorum.len() > 2 * self.config.f {
             self.execute();
+            if self.id == self.view_number % self.config.n as u8 && !self.requests.is_empty() {
+                self.do_close_batch();
+            }
         }
     }
 
