@@ -56,7 +56,7 @@ impl Deploy for Program {
                     instant = now;
                 }
                 // tune this parameter
-                if now - instant >= Duration::from_millis(10) {
+                if now - instant >= Duration::from_millis(100) {
                     on_idle();
                 }
             }

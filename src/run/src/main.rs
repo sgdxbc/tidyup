@@ -12,7 +12,7 @@ fn main() {
             .unzip::<_, _, Vec<_>, Vec<_>>();
     let mut command = Command {
         app: AppMode::Null,
-        protocol: ProtocolMode::Unreplicated,
+        protocol: ProtocolMode::Pbft,
         config: TransportConfig {
             replica: Box::new([
                 ([10, 0, 0, 1], 7001).into(),
@@ -21,7 +21,7 @@ fn main() {
                 ([10, 0, 0, 4], 7001).into(),
             ]),
             n: 4,
-            f: 0,
+            f: 1,
             public_keys: public_keys.into_boxed_slice(),
             secret_keys: secret_keys.into_boxed_slice(),
         },
@@ -29,7 +29,7 @@ fn main() {
         replica: None,
     };
 
-    command.replica = Some(ReplicaCommand { id: 0, n_thread: 15 });
+    command.replica = Some(ReplicaCommand { id: 0, n_thread: 4 });
     command.client = None;
     for host in [
         "nsl-node1.d1.comp.nus.edu.sg",
@@ -43,13 +43,13 @@ fn main() {
         command.replica.as_mut().unwrap().id += 1;
     }
 
-    sleep(Duration::from_secs(1));
+    sleep(Duration::from_secs(2));
     command.replica = None;
     command.client = Some(ClientCommand {
-        n_client: 30.try_into().unwrap(),
+        n_client: 140.try_into().unwrap(),
         n_thread: 16.try_into().unwrap(),
         ip: [10, 0, 0, 4].into(),
-        n_report: 10.try_into().unwrap(),
+        n_report: 60.try_into().unwrap(),
     });
     TcpStream::connect(("nsl-node4.d1.comp.nus.edu.sg", 7000))
         .unwrap()

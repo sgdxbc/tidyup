@@ -81,10 +81,11 @@ impl State for Client {
             if message.request_number != self.request_number {
                 break 'rx;
             }
-            self.results.insert(0, message.result);
+            self.results.insert(message.replica_id, message.result);
             if self.results.len() > self.common.config.f {
                 // TODO check matching results
                 self.committed_result = Some(self.results.drain().next().unwrap().1);
+                self.view_number = message.view_number;
                 self.op = None;
                 self.resend_instant = Default::default();
             }
@@ -109,7 +110,7 @@ impl Client {
             // TODO broadcast on resend
             self.common.config.replica[self.view_number as usize % self.common.config.n],
         );
-        self.resend_instant = self.common.clock.after(Duration::from_millis(10));
+        self.resend_instant = self.common.clock.after(Duration::from_millis(50));
     }
 }
 
@@ -142,6 +143,8 @@ struct MainThread {
     op_number: u32,
     execute_number: u32,
     log: Vec<LogEntry>,
+    prepare_quorums: HashMap<(u32, [u8; 32]), HashMap<u8, Signature>>,
+    commit_quorums: HashMap<(u32, [u8; 32]), HashMap<u8, Signature>>,
     requests: Vec<Request>,
     reorder_pre_prepare: HashMap<u32, (Signed<PrePrepare>, Box<[Request]>)>,
     ingress: Receiver<ToMain>,
@@ -151,13 +154,11 @@ struct MainThread {
 struct LogEntry {
     pre_prepare: Signed<PrePrepare>,
     requests: Box<[Request]>,
-    prepare_quorum: HashMap<u8, Signature>,
-    commit_quorum: HashMap<u8, Signature>,
 }
 
 struct ListenThread {
     rx: RxChannel,
-    buffer: [u8; 1500],
+    buffer: [u8; 65000],
     to_main: Sender<ToMain>,
     to_crypto: Sender<ToCrypto>,
 }
@@ -174,8 +175,8 @@ struct CryptoThread {
 
 impl Replica {
     pub fn new(common: ReplicaCommon) -> Self {
-        let to_main = crossbeam_channel::bounded(1024);
-        let to_crypto = crossbeam_channel::bounded(1024);
+        let to_main = crossbeam_channel::bounded(4096);
+        let to_crypto = crossbeam_channel::bounded(4096);
         let public_keys = common.config.public_keys.clone();
         let secret_key = common.config.secret_keys[common.id];
         let broadcast_addresses = common
@@ -195,6 +196,8 @@ impl Replica {
                 op_number: 0,
                 execute_number: 0,
                 log: Default::default(),
+                prepare_quorums: Default::default(),
+                commit_quorums: Default::default(),
                 requests: Default::default(),
                 reorder_pre_prepare: Default::default(),
                 ingress: to_main.1,
@@ -202,7 +205,7 @@ impl Replica {
             },
             listen: ListenThread {
                 rx: common.rx,
-                buffer: [0; 1500],
+                buffer: [0; 65000],
                 to_main: to_main.0.clone(),
                 to_crypto: to_crypto.0,
             },
@@ -259,8 +262,6 @@ impl State for MainThread {
                     }
                 }
             }
-            // we don't handle the prepare-before-pre-prepare or even
-            // commit-before-pre-prepare reordering
             Ok(
                 ToMain::Verified(ToReplica::Prepare(message))
                 | ToMain::Signed(ToReplica::Prepare(message)),
@@ -277,12 +278,24 @@ impl State for MainThread {
 
 impl MainThread {
     fn handle_request(&mut self, message: Request) {
+        if let Some(reply) = self.client_table.get(&message.client_id) {
+            if reply.request_number > message.request_number {
+                return;
+            }
+            if reply.request_number == message.request_number {
+                self.to_crypto
+                    .send(ToCrypto::SendReply(message.addr, reply.clone()))
+                    .unwrap();
+                return;
+            }
+        }
+
         if self.id != self.view_number % self.config.n as u8 {
             todo!()
         }
         self.requests.push(message);
         // tune concurrent parameter if it does not work well
-        if self.op_number < self.execute_number + 10 {
+        if self.op_number < self.execute_number + 6 {
             self.do_close_batch();
         }
     }
@@ -310,8 +323,6 @@ impl MainThread {
         self.log.push(LogEntry {
             pre_prepare: message,
             requests,
-            prepare_quorum: Default::default(),
-            commit_quorum: Default::default(),
         });
         if self.id != self.view_number % self.config.n as u8 {
             let prepare = Prepare {
@@ -321,6 +332,8 @@ impl MainThread {
                 replica_id: self.id,
             };
             self.to_crypto.send(ToCrypto::SendPrepare(prepare)).unwrap()
+            // no need to check for prepared/committed, we will check that when
+            // our own Prepare is ready
         }
     }
 
@@ -328,29 +341,28 @@ impl MainThread {
         if message.inner.view_number != self.view_number {
             return;
         }
-        let Some(entry) = Self::entry_mut(&mut self.log, message.inner.op_number) else {
-            //
-            return;
-        };
-        if message.inner.request_digest != entry.pre_prepare.inner.request_digest {
-            //
+
+        if self.is_prepared(message.inner.op_number, message.inner.request_digest) {
             return;
         }
-        if entry.prepare_quorum.len() > 2 * self.config.f {
-            return;
-        }
+
+        let entry = self
+            .prepare_quorums
+            .entry((message.inner.op_number, message.inner.request_digest))
+            .or_default();
+        let op_number = message.inner.op_number;
         let request_digest = message.inner.request_digest;
-        entry
-            .prepare_quorum
-            .insert(message.inner.replica_id, message.signature);
-        if entry.prepare_quorum.len() > 2 * self.config.f {
+        entry.insert(message.inner.replica_id, message.signature);
+
+        if self.is_prepared(op_number, request_digest) {
             let commit = Commit {
                 view_number: self.view_number,
-                op_number: self.op_number,
+                op_number: message.inner.op_number,
                 request_digest,
                 replica_id: self.id,
             };
             self.to_crypto.send(ToCrypto::SendCommit(commit)).unwrap();
+            // no need to check committed, same as above
         }
     }
 
@@ -358,24 +370,21 @@ impl MainThread {
         if message.inner.view_number != self.view_number {
             return;
         }
-        let Some(entry) = Self::entry_mut(&mut self.log, message.inner.op_number) else {
-            //
-            return;
-        };
-        if message.inner.request_digest != entry.pre_prepare.inner.request_digest {
-            //
+
+        if self.is_committed(message.inner.op_number, message.inner.request_digest) {
             return;
         }
-        if entry.commit_quorum.len() > 2 * self.config.f {
-            return;
-        }
-        entry
-            .commit_quorum
-            .insert(message.inner.replica_id, message.signature);
-        if entry.commit_quorum.len() > 2 * self.config.f {
+
+        let entry = self
+            .commit_quorums
+            .entry((message.inner.op_number, message.inner.request_digest))
+            .or_default();
+        entry.insert(message.inner.replica_id, message.signature);
+        if self.is_committed(message.inner.op_number, message.inner.request_digest) {
+            // println!("commit {}", message.inner.op_number);
             self.execute();
             if self.id == self.view_number % self.config.n as u8 && !self.requests.is_empty() {
-                self.do_close_batch();
+                self.do_close_batch()
             }
         }
     }
@@ -384,9 +393,10 @@ impl MainThread {
         let Some(entry) = Self::entry(&self.log, self.execute_number + 1) else {
             return;
         };
-        if entry.prepare_quorum.len() > 2 * self.config.f
-            && entry.commit_quorum.len() > 2 * self.config.f
-        {
+        if self.is_committed(
+            self.execute_number + 1,
+            entry.pre_prepare.inner.request_digest,
+        ) {
             self.execute_number += 1;
             for request in &entry.requests[..] {
                 // not sure necessary or not but let's play safe and filter again
@@ -407,6 +417,7 @@ impl MainThread {
                     .send(ToCrypto::SendReply(request.addr, reply))
                     .unwrap();
             }
+            self.execute()
         }
     }
 
@@ -418,8 +429,39 @@ impl MainThread {
         log.get((op_number - 1) as usize)
     }
 
-    fn entry_mut(log: &mut [LogEntry], op_number: u32) -> Option<&mut LogEntry> {
-        log.get_mut((op_number - 1) as usize)
+    fn is_prepared(&self, op_number: u32, request_digest: [u8; 32]) -> bool {
+        Self::entry(&self.log, op_number).is_some()
+            && self
+                .prepare_quorums
+                .get(&(op_number, request_digest))
+                .map(HashMap::len)
+                .unwrap_or_default()
+                >= 2 * self.config.f
+    }
+
+    fn is_committed(&self, op_number: u32, request_digest: [u8; 32]) -> bool {
+        self.is_prepared(op_number, request_digest)
+            && self
+                .commit_quorums
+                .get(&(op_number, request_digest))
+                .map(HashMap::len)
+                .unwrap_or_default()
+                > 2 * self.config.f
+    }
+}
+
+impl Drop for MainThread {
+    fn drop(&mut self) {
+        if self.id == 0 {
+            println!(
+                "* Average batch size: {:.2}",
+                self.log
+                    .iter()
+                    .map(|entry| entry.requests.len())
+                    .sum::<usize>() as f32
+                    / self.log.len() as f32
+            )
+        }
     }
 }
 
@@ -461,7 +503,7 @@ impl SharedState for CryptoThread {
                     &bincode::options().serialize(&requests).unwrap(),
                 );
                 if request_digest.as_ref() != &message.inner.request_digest {
-                    //
+                    println!("! Invalid PrePrepare request digest");
                     return true;
                 }
                 if {
@@ -469,7 +511,7 @@ impl SharedState for CryptoThread {
                     let public_key = &self.public_keys
                         [message.inner.view_number as usize % self.public_keys.len()];
                     let message = secp256k1::Message::from_hashed_data::<sha256::Hash>(
-                        &bincode::options().serialize(&message).unwrap(),
+                        &bincode::options().serialize(&message.inner).unwrap(),
                     );
                     self.secp.verify_ecdsa(&message, signature, public_key)
                 }
@@ -479,7 +521,7 @@ impl SharedState for CryptoThread {
                         .send(ToMain::Verified(ToReplica::PrePrepare(message, requests)))
                         .unwrap()
                 } else {
-                    //
+                    println!("! Invalid PrePrepare signature");
                 }
                 true
             }
@@ -488,7 +530,7 @@ impl SharedState for CryptoThread {
                     let signature = &message.signature;
                     let public_key = &self.public_keys[message.inner.replica_id as usize];
                     let message = secp256k1::Message::from_hashed_data::<sha256::Hash>(
-                        &bincode::options().serialize(&message).unwrap(),
+                        &bincode::options().serialize(&message.inner).unwrap(),
                     );
                     self.secp.verify_ecdsa(&message, signature, public_key)
                 }
@@ -507,7 +549,7 @@ impl SharedState for CryptoThread {
                     let signature = &message.signature;
                     let public_key = &self.public_keys[message.inner.replica_id as usize];
                     let message = secp256k1::Message::from_hashed_data::<sha256::Hash>(
-                        &bincode::options().serialize(&message).unwrap(),
+                        &bincode::options().serialize(&message.inner).unwrap(),
                     );
                     self.secp.verify_ecdsa(&message, signature, public_key)
                 }

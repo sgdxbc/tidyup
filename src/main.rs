@@ -12,6 +12,7 @@ use bincode::Options;
 use message::{AppMode, Command, ProtocolMode};
 
 use tidyup_v2::{
+    pbft,
     program::{bench_client, bench_replica},
     unreplicated, App,
 };
@@ -31,6 +32,7 @@ fn main() {
             let args = bench_replica::Program::args(config, replica.id, app, replica.n_thread);
             match command.protocol {
                 ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut program),
+                ProtocolMode::Pbft => pbft::Replica::new(args).deploy(&mut program),
             }
             program.run_until_interrupt();
         }
@@ -38,21 +40,31 @@ fn main() {
             let n_result = Arc::new(AtomicU32::new(0));
             let handles = (0..client.n_thread.get())
                 .map(|_| {
+                    let protocol = command.protocol.clone();
                     let config = config.clone();
                     let client = client.clone();
                     let n_result = n_result.clone();
-                    spawn(move || match command.protocol {
+                    let run_duration = Duration::from_secs(client.n_report.get() as _)
+                        + Duration::from_millis(100);
+                    spawn(move || match protocol {
                         ProtocolMode::Unreplicated => {
                             bench_client::Program::<unreplicated::Client>::new(
                                 client.n_client,
                                 config,
                                 client.ip,
-                                Duration::from_secs(client.n_report.get() as _)
-                                    + Duration::from_millis(100),
+                                run_duration,
                                 n_result,
                             )
                             .run()
                         }
+                        ProtocolMode::Pbft => bench_client::Program::<pbft::Client>::new(
+                            client.n_client,
+                            config,
+                            client.ip,
+                            run_duration,
+                            n_result,
+                        )
+                        .run(),
                     })
                 })
                 .collect::<Vec<_>>();

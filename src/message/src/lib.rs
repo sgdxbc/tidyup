@@ -56,7 +56,7 @@ pub enum AppMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProtocolMode {
     Unreplicated,
-    // HotStuff,
+    Pbft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

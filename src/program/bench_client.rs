@@ -15,7 +15,7 @@ use nix::sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollEvent, EpollFlag
 use crate::{
     core::{ClientCommon, Clock, RxChannel, TransportConfig, TxChannel},
     misc::{alloc_client_id, bind_core},
-    unreplicated, ClientState, OptionInstant,
+    pbft, unreplicated, ClientState, OptionInstant,
 };
 
 pub struct Program<T> {
@@ -58,6 +58,51 @@ impl Program<unreplicated::Client> {
                     clock: Clock::Real,
                 };
                 unreplicated::Client::new(common)
+            })
+            .collect();
+        let poll_instants = vec![Default::default(); n_client.get()].into_boxed_slice();
+        Self {
+            clients,
+            epoll_fd,
+            poll_instants,
+            instant_polls: (0..n_client.get())
+                .map(|i| (Default::default(), i))
+                .collect(),
+            run_duration,
+            n_result,
+        }
+    }
+}
+
+impl Program<pbft::Client> {
+    pub fn new(
+        n_client: NonZeroUsize,
+        config: Arc<TransportConfig>,
+        ip: IpAddr,
+        run_duration: Duration,
+        n_result: Arc<AtomicU32>,
+    ) -> Self {
+        let epoll_fd = epoll_create().unwrap();
+        let clients = (0..n_client.get())
+            .map(|i| {
+                let socket = UdpSocket::bind((ip, 0)).unwrap();
+                socket.set_nonblocking(true).unwrap();
+                epoll_ctl(
+                    epoll_fd,
+                    EpollOp::EpollCtlAdd,
+                    socket.as_raw_fd(),
+                    &mut EpollEvent::new(EpollFlags::EPOLLIN | EpollFlags::EPOLLET, i as _),
+                )
+                .unwrap();
+                let common = ClientCommon {
+                    id: alloc_client_id(),
+                    config: config.clone(),
+                    tx: TxChannel::Udp(socket.try_clone().unwrap()),
+                    rx_addr: socket.local_addr().unwrap(),
+                    rx: RxChannel::Udp(socket),
+                    clock: Clock::Real,
+                };
+                pbft::Client::new(common)
             })
             .collect();
         let poll_instants = vec![Default::default(); n_client.get()].into_boxed_slice();
