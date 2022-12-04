@@ -9,7 +9,7 @@ nodes = [
     #
 ]
 wait_nodes = [
-    "nsl-node4.d1.comp.nus.edu.sg",
+    "nsl-node5.d1.comp.nus.edu.sg",
     #
 ]
 
@@ -21,7 +21,7 @@ async def main():
     p = await proc("rsync", "target/release/tidyup-v2", "nsl-node1.d1.comp.nus.edu.sg:~")
     await p.wait()
     assert p.returncode == 0
-    print("Updated")
+    print("[R] * Updated")
 
     tasks = [spawn(remote(host, f"[{i}]")) for i, host in enumerate(nodes)]
     wait_tasks = [spawn(remote(host, "[C]")) for host in wait_nodes]

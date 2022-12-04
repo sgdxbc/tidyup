@@ -6,13 +6,14 @@ use rand::thread_rng;
 use secp256k1::Secp256k1;
 
 fn main() {
+    println!("[R] * Lift off");
     let (secret_keys, public_keys) =
         repeat_with(|| Secp256k1::new().generate_keypair(&mut thread_rng()))
             .take(4)
             .unzip::<_, _, Vec<_>, Vec<_>>();
     let mut command = Command {
         app: AppMode::Null,
-        protocol: ProtocolMode::Pbft,
+        protocol: ProtocolMode::Unreplicated,
         config: TransportConfig {
             replica: Box::new([
                 ([10, 0, 0, 1], 7001).into(),
@@ -46,12 +47,12 @@ fn main() {
     sleep(Duration::from_secs(2));
     command.replica = None;
     command.client = Some(ClientCommand {
-        n_client: 200.try_into().unwrap(),
-        n_thread: 16.try_into().unwrap(),
-        ip: [10, 0, 0, 4].into(),
+        n_client: 40.try_into().unwrap(),
+        n_thread: 10.try_into().unwrap(),
+        ip: [10, 0, 0, 5].into(),
         n_report: 20.try_into().unwrap(),
     });
-    TcpStream::connect(("nsl-node4.d1.comp.nus.edu.sg", 7000))
+    TcpStream::connect(("nsl-node5.d1.comp.nus.edu.sg", 7000))
         .unwrap()
         .write_all(&bincode::options().serialize(&command).unwrap())
         .unwrap();

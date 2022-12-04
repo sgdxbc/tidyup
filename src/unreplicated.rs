@@ -141,8 +141,8 @@ impl Replica {
                 to_main: message_channel.0,
             },
             effect: EffectThread {
-                tx: common.tx.clone(),
-                ingress: effect_channel.1.clone(),
+                tx: common.tx,
+                ingress: effect_channel.1,
             },
         }
     }
@@ -224,5 +224,72 @@ impl SharedState for EffectThread {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{
+        core::{ClientState, State},
+        simulated::Network,
+        App,
+    };
+
+    use super::{Client, Replica};
+
+    #[test]
+    fn one_op() {
+        let mut network = Network::new(1, 0);
+        let mut replica = Replica::new(network.replica(0, App::Null));
+        let mut client = Client::new(network.insert_client());
+        client.invoke(Box::new([]));
+        while client.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while replica.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while client.poll() {}
+        assert!(client.take_result().is_some());
+        assert_eq!(replica.main.op_number, 1);
+    }
+
+    #[test]
+    fn resend_request() {
+        let mut network = Network::new(1, 0);
+        let mut replica = Replica::new(network.replica(0, App::Null));
+        let mut client = Client::new(network.insert_client());
+        client.invoke(Box::new([]));
+        while client.poll() {}
+        while network.poll(|_, _, _| false) {}
+        assert!(!replica.poll());
+        network.elapse(Duration::from_millis(15));
+        while client.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while replica.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while client.poll() {}
+        assert!(client.take_result().is_some());
+    }
+
+    #[test]
+    fn resend_reply() {
+        let mut network = Network::new(1, 0);
+        let mut replica = Replica::new(network.replica(0, App::Null));
+        let mut client = Client::new(network.insert_client());
+        client.invoke(Box::new([]));
+        while client.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while replica.poll() {}
+        while network.poll(|_, _, _| false) {}
+        assert!(!client.poll());
+        network.elapse(Duration::from_millis(15));
+        while client.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while replica.poll() {}
+        while network.poll(|_, _, _| true) {}
+        while client.poll() {}
+        assert!(client.take_result().is_some());
+        assert_eq!(replica.main.op_number, 1);
     }
 }

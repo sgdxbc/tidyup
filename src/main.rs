@@ -29,7 +29,7 @@ fn main() {
                 AppMode::Null => App::Null,
             };
             let mut program = replica::Program::new(replica.n_thread);
-            let args = replica::Program::args(config, replica.id, app, replica.n_thread);
+            let args = replica::Program::args(config, replica.id, app);
             match command.protocol {
                 ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut program),
                 ProtocolMode::Pbft => pbft::Replica::new(args).deploy(&mut program),

@@ -2,7 +2,7 @@ use std::{
     cmp::Reverse,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
-    sync::{mpsc, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -49,7 +49,6 @@ pub struct ReplicaCommon {
     pub tx: TxChannel,
     pub rx: RxChannel,
     pub clock: Clock,
-    pub n_effect: usize,
 }
 
 pub struct ClientCommon {
@@ -63,14 +62,19 @@ pub struct ClientCommon {
 
 pub enum TxChannel {
     Udp(UdpSocket),
-    Simulated(()), //
+    #[cfg(test)]
+    Simulated(
+        crossbeam_channel::Sender<(SocketAddr, SocketAddr, Vec<u8>)>,
+        SocketAddr,
+    ),
 }
 
 impl Clone for TxChannel {
     fn clone(&self) -> Self {
         match self {
             Self::Udp(socket) => Self::Udp(socket.try_clone().unwrap()),
-            Self::Simulated(tx) => Self::Simulated(tx.clone()),
+            #[cfg(test)]
+            Self::Simulated(tx, addr) => Self::Simulated(tx.clone(), *addr),
         }
     }
 }
@@ -79,14 +83,19 @@ impl TxChannel {
     pub fn send_to(&self, payload: &[u8], dest: SocketAddr) -> usize {
         match self {
             Self::Udp(socket) => socket.send_to(payload, dest).unwrap(),
-            Self::Simulated(_) => todo!(),
+            #[cfg(test)]
+            Self::Simulated(sender, addr) => {
+                sender.try_send((*addr, dest, payload.to_vec())).unwrap();
+                payload.len()
+            }
         }
     }
 }
 
 pub enum RxChannel {
     Udp(UdpSocket),
-    Simulated(mpsc::Receiver<()>),
+    #[cfg(test)]
+    Simulated(crossbeam_channel::Receiver<(SocketAddr, Vec<u8>)>),
 }
 
 impl RxChannel {
@@ -99,7 +108,17 @@ impl RxChannel {
                 },
                 Some,
             ),
-            Self::Simulated(_) => todo!(),
+            #[cfg(test)]
+            Self::Simulated(receiver) => receiver.try_recv().map_or_else(
+                |err| {
+                    assert!(err.is_empty());
+                    None
+                },
+                |(remote, buffer)| {
+                    payload[..buffer.len()].copy_from_slice(&buffer);
+                    Some((buffer.len(), remote))
+                },
+            ),
         }
     }
 }
@@ -107,21 +126,25 @@ impl RxChannel {
 #[derive(Debug, Clone)]
 pub enum Clock {
     Real,
-    Simulated(()),
+    #[cfg(test)]
+    Simulated(Instant, Arc<std::sync::Mutex<Duration>>),
 }
 
 impl Clock {
     pub fn now(&self) -> OptionInstant {
         match self {
             Self::Real => Reverse(Some(Reverse(Instant::now()))),
-            Self::Simulated(_) => todo!(),
+            #[cfg(test)]
+            Self::Simulated(instant, elapsed) => {
+                Reverse(Some(Reverse(*instant + *elapsed.try_lock().unwrap())))
+            }
         }
     }
 
     pub fn after(&self, duration: Duration) -> OptionInstant {
-        match self {
-            Self::Real => Reverse(Some(Reverse(Instant::now() + duration))),
-            Self::Simulated(_) => todo!(),
-        }
+        let Reverse(Some(Reverse(now))) = self.now() else {
+                unreachable!()
+            };
+        Reverse(Some(Reverse(now + duration)))
     }
 }

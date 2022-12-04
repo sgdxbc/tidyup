@@ -21,13 +21,11 @@ use crate::{
 pub struct Program {
     threads: Vec<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
-    to_thread: (
-        Sender<Box<dyn FnMut() + Send>>,
-        Receiver<Box<dyn FnMut() + Send>>,
-    ),
+    to_thread: Channel<Box<dyn FnMut() + Send>>,
     shared_states: Vec<Arc<dyn SharedState + Send + Sync>>,
     n_thread: usize,
 }
+type Channel<T> = (Sender<T>, Receiver<T>);
 
 impl Program {
     pub fn new(n_thread: usize) -> Self {
@@ -73,26 +71,20 @@ impl Drop for Program {
         if !self.shutdown.swap(true, Ordering::SeqCst) {
             println!("! Implicitly shutdown replica threads on driver dropping");
         }
-        for thread in Vec::from(take(&mut self.threads)) {
+        for thread in take(&mut self.threads) {
             thread.join().unwrap()
         }
     }
 }
 
 impl Program {
-    pub fn args(
-        config: Arc<TransportConfig>,
-        i: usize,
-        app: App,
-        n_effect: usize,
-    ) -> ReplicaCommon {
+    pub fn args(config: Arc<TransportConfig>, i: usize, app: App) -> ReplicaCommon {
         let socket = UdpSocket::bind(config.replica[i]).unwrap();
         socket.set_nonblocking(true).unwrap();
         ReplicaCommon {
             config,
             tx: TxChannel::Udp(socket.try_clone().unwrap()),
             rx: RxChannel::Udp(socket),
-            n_effect,
             id: i,
             app,
             clock: Clock::Real,
@@ -139,7 +131,7 @@ impl Program {
 
         unsafe { signal(SIGINT, SigHandler::SigDfl) }.unwrap();
         self.shutdown.store(true, Ordering::SeqCst);
-        for thread in Vec::from(take(&mut self.threads)) {
+        for thread in take(&mut self.threads) {
             thread.join().unwrap();
         }
     }
