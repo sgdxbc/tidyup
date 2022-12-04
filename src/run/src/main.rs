@@ -46,10 +46,10 @@ fn main() {
     sleep(Duration::from_secs(2));
     command.replica = None;
     command.client = Some(ClientCommand {
-        n_client: 140.try_into().unwrap(),
+        n_client: 200.try_into().unwrap(),
         n_thread: 16.try_into().unwrap(),
         ip: [10, 0, 0, 4].into(),
-        n_report: 60.try_into().unwrap(),
+        n_report: 20.try_into().unwrap(),
     });
     TcpStream::connect(("nsl-node4.d1.comp.nus.edu.sg", 7000))
         .unwrap()

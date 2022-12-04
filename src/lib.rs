@@ -5,7 +5,7 @@ pub mod pbft;
 pub mod unreplicated;
 pub mod program {
     pub mod bench_client;
-    pub mod bench_replica;
+    pub mod replica;
 }
 
 pub use crate::app::App;

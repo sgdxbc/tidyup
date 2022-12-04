@@ -175,8 +175,8 @@ struct CryptoThread {
 
 impl Replica {
     pub fn new(common: ReplicaCommon) -> Self {
-        let to_main = crossbeam_channel::bounded(4096);
-        let to_crypto = crossbeam_channel::bounded(4096);
+        let to_main = crossbeam_channel::unbounded();
+        let to_crypto = crossbeam_channel::unbounded();
         let public_keys = common.config.public_keys.clone();
         let secret_key = common.config.secret_keys[common.id];
         let broadcast_addresses = common

@@ -13,7 +13,7 @@ use message::{AppMode, Command, ProtocolMode};
 
 use tidyup_v2::{
     pbft,
-    program::{bench_client, bench_replica},
+    program::{bench_client, replica},
     unreplicated, App,
 };
 
@@ -28,8 +28,8 @@ fn main() {
             let app = match command.app {
                 AppMode::Null => App::Null,
             };
-            let mut program = bench_replica::Program::new(replica.n_thread);
-            let args = bench_replica::Program::args(config, replica.id, app, replica.n_thread);
+            let mut program = replica::Program::new(replica.n_thread);
+            let args = replica::Program::args(config, replica.id, app, replica.n_thread);
             match command.protocol {
                 ProtocolMode::Unreplicated => unreplicated::Replica::new(args).deploy(&mut program),
                 ProtocolMode::Pbft => pbft::Replica::new(args).deploy(&mut program),

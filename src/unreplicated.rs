@@ -124,8 +124,8 @@ struct EffectThread {
 
 impl Replica {
     pub fn new(common: ReplicaCommon) -> Self {
-        let message_channel = crossbeam_channel::bounded(1024);
-        let effect_channel = crossbeam_channel::bounded(1024);
+        let message_channel = crossbeam_channel::unbounded();
+        let effect_channel = crossbeam_channel::unbounded();
         Self {
             main: MainThread {
                 app: common.app,
