@@ -1,4 +1,5 @@
 use std::{
+    env::var,
     net::TcpListener,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -18,7 +19,10 @@ use tidyup_v2::{
 };
 
 fn main() {
-    let socket = TcpListener::bind(("0.0.0.0", 7000)).unwrap();
+    let host = var("SSH_CONNECTION")
+        .map(|s| s.split(' ').nth(2).unwrap().trim().to_owned())
+        .unwrap_or(String::from("0.0.0.0"));
+    let socket = TcpListener::bind((host, 7000)).unwrap();
     let command = bincode::options()
         .deserialize_from::<_, Command>(socket.accept().unwrap().0)
         .unwrap();

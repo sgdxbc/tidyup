@@ -6,18 +6,19 @@ use rand::thread_rng;
 use secp256k1::Secp256k1;
 
 const REPLICA_HOSTS: &[&str] = &[
-    "nsl-node1.d1.comp.nus.edu.sg",
-    "nsl-node2.d1.comp.nus.edu.sg",
-    "nsl-node3.d1.comp.nus.edu.sg",
+    "127.0.0.1",
+    "127.0.0.2",
+    "127.0.0.3",
+    "127.0.0.4",
 ];
 
 const CLIENT_HOSTS: &[&str] = &[
-    "nsl-node5.d1.comp.nus.edu.sg",
+    "127.0.0.101",
     //
 ];
 
 const SYNC_HOSTS: &[&str] = &[
-    "nsl-node1.d1.comp.nus.edu.sg",
+    "127.0.0.1",
     //
 ];
 
@@ -46,13 +47,13 @@ fn main() {
             .unzip::<_, _, Vec<_>, Vec<_>>();
     let mut command = Command {
         app: AppMode::Null,
-        protocol: ProtocolMode::Unreplicated,
+        protocol: ProtocolMode::Pbft,
         config: TransportConfig {
             replica: Box::new([
-                ([10, 0, 0, 1], 7001).into(),
-                ([10, 0, 0, 2], 7001).into(),
-                ([10, 0, 0, 3], 7001).into(),
-                ([10, 0, 0, 4], 7001).into(),
+                ([127, 0, 0, 1], 7001).into(),
+                ([127, 0, 0, 2], 7001).into(),
+                ([127, 0, 0, 3], 7001).into(),
+                ([127, 0, 0, 4], 7001).into(),
             ]),
             n: 4,
             f: 1,
@@ -76,10 +77,10 @@ fn main() {
     sleep(Duration::from_secs(2));
     command.replica = None;
     command.client = Some(ClientCommand {
-        n_client: 40.try_into().unwrap(),
-        n_thread: 10.try_into().unwrap(),
-        ip: [10, 0, 0, 5].into(),
-        n_report: 20.try_into().unwrap(),
+        n_client: 1.try_into().unwrap(),
+        n_thread: 1.try_into().unwrap(),
+        ip: [127, 0, 0, 101].into(),
+        n_report: 10.try_into().unwrap(),
     });
     for &host in CLIENT_HOSTS {
         TcpStream::connect((host, 7000))

@@ -22,3 +22,5 @@ jobs:
         with:
           command: test
           args: --release --lib
+      - if: matrix.rust == 'stable'
+        run: python3 run.py
