@@ -32,6 +32,7 @@ All dependent crates are introduced as extensions of standard library. For the o
 
     `src/run` is a script-like package for rapidly evaluate same implementation (i.e. identical root and `src/message`) with different parameters.
     It is kept minimal and fast to recompile, so we can directly modify its code for all the time instead of defining and editing yet another text-based configuration file.
+*   Avoid type parameter, especially on actor types.
 *   Send configuration with TCP instead of specifying numerous command line arguments and configuration files. 
 It really clears a lot of conventions and boilerplate ^_^
 
