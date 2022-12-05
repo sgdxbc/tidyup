@@ -1,11 +1,44 @@
-use std::{io::Write, iter::repeat_with, net::TcpStream, thread::sleep, time::Duration};
+use std::{env, io::Write, iter::repeat_with, net::TcpStream, thread::sleep, time::Duration};
 
 use bincode::Options;
 use message::{AppMode, ClientCommand, Command, ProtocolMode, ReplicaCommand, TransportConfig};
 use rand::thread_rng;
 use secp256k1::Secp256k1;
 
+const REPLICA_HOSTS: &[&str] = &[
+    "nsl-node1.d1.comp.nus.edu.sg",
+    "nsl-node2.d1.comp.nus.edu.sg",
+    "nsl-node3.d1.comp.nus.edu.sg",
+];
+
+const CLIENT_HOSTS: &[&str] = &[
+    "nsl-node5.d1.comp.nus.edu.sg",
+    //
+];
+
+const SYNC_HOSTS: &[&str] = &[
+    "nsl-node1.d1.comp.nus.edu.sg",
+    //
+];
+
 fn main() {
+    match env::args().nth(1).as_deref() {
+        Some("export") => {
+            for &host in SYNC_HOSTS {
+                println!("SYNC {host}");
+            }
+            for &host in REPLICA_HOSTS {
+                println!("RUN_KILL {host}")
+            }
+            for &host in CLIENT_HOSTS {
+                println!("RUN_WAIT {host}");
+            }
+            return;
+        }
+        Some("liftoff") => {}
+        _ => panic!(),
+    }
+
     println!("[R] * Lift off");
     let (secret_keys, public_keys) =
         repeat_with(|| Secp256k1::new().generate_keypair(&mut thread_rng()))
@@ -32,11 +65,7 @@ fn main() {
 
     command.replica = Some(ReplicaCommand { id: 0, n_thread: 4 });
     command.client = None;
-    for host in [
-        "nsl-node1.d1.comp.nus.edu.sg",
-        "nsl-node2.d1.comp.nus.edu.sg",
-        "nsl-node3.d1.comp.nus.edu.sg",
-    ] {
+    for &host in REPLICA_HOSTS {
         TcpStream::connect((host, 7000))
             .unwrap()
             .write_all(&bincode::options().serialize(&command).unwrap())
@@ -52,8 +81,10 @@ fn main() {
         ip: [10, 0, 0, 5].into(),
         n_report: 20.try_into().unwrap(),
     });
-    TcpStream::connect(("nsl-node5.d1.comp.nus.edu.sg", 7000))
-        .unwrap()
-        .write_all(&bincode::options().serialize(&command).unwrap())
-        .unwrap();
+    for &host in CLIENT_HOSTS {
+        TcpStream::connect((host, 7000))
+            .unwrap()
+            .write_all(&bincode::options().serialize(&command).unwrap())
+            .unwrap();
+    }
 }
