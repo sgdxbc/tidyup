@@ -12,6 +12,7 @@ jobs:
             experimental: true
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental }}
+    # if without container, when connecting to localhost server it gets refused
     container: catthehacker/ubuntu:act-latest
     steps:
       - uses: actions/checkout@v2

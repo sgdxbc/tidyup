@@ -12,10 +12,25 @@ if environ.get("CI"):
 else:
     CI = False
 
+
 async def main():
-    p = await proc(
-        "cargo", "run", "--quiet", "--package", "run", "--", "export", stdout=PIPE
-    )
+    if not CI:
+        p = await proc(
+            "cargo", "run", "--quiet", "--package", "run", "--", "export", stdout=PIPE
+        )
+    else:
+        p = await proc(
+            "cargo",
+            "run",
+            "--quiet",
+            "--package",
+            "run",
+            "--example",
+            "localhost",
+            "--",
+            "export",
+            stdout=PIPE,
+        )
     out, _ = await p.communicate()
     assert p.returncode == 0
     for line in out.decode().splitlines():
@@ -26,7 +41,9 @@ async def main():
         if line.startswith("RUN_WAIT"):
             wait_nodes.append(line.replace("RUN_WAIT", "", 1).strip())
     if CI:
-        assert all(node.startswith("127.") for node in sync_nodes + kill_nodes + wait_nodes)
+        assert all(
+            node.startswith("127.") for node in sync_nodes + kill_nodes + wait_nodes
+        )
     print("[R] * Exported")
 
     p = await proc("cargo", "build", "--release", "--quiet", "--bin", PROG)
@@ -49,7 +66,20 @@ async def main():
     wait_tasks = [spawn(remote(host, "[C]")) for host in wait_nodes]
 
     await sleep(2)
-    p = await proc("cargo", "run", "--quiet", "--package", "run", "--", "liftoff")
+    if not CI:
+        p = await proc("cargo", "run", "--quiet", "--package", "run", "--", "liftoff")
+    else:
+        p = await proc(
+            "cargo",
+            "run",
+            "--quiet",
+            "--package",
+            "run",
+            "--example",
+            "localhost",
+            "--",
+            "liftoff",
+        )
     await p.wait()
 
     await gather(*wait_tasks)
