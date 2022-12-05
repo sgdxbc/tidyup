@@ -24,3 +24,4 @@ jobs:
           args: --release --lib
       - if: matrix.rust == 'stable'
         run: python3 run.py
+        timeout-minutes: 1

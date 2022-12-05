@@ -159,6 +159,10 @@ impl<T> Program<T> {
                     events = &events[1..];
                 }
             }
+
+            if option_env!("CI") == Some("true") {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 

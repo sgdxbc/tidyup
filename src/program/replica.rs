@@ -57,6 +57,10 @@ impl Deploy for Program {
                 if now - instant >= Duration::from_millis(100) {
                     on_idle();
                 }
+
+                if option_env!("CI") == Some("true") {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
         }))
     }
@@ -113,6 +117,10 @@ impl Program {
                 while !shutdown.load(Ordering::SeqCst) {
                     for shared_state in &shared_states {
                         shared_state.shared_poll();
+                    }
+
+                    if option_env!("CI") == Some("true") {
+                        std::thread::sleep(Duration::from_millis(1));
                     }
                 }
             }))
