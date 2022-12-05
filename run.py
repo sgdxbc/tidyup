@@ -48,10 +48,7 @@ async def main():
     tasks = [spawn(remote(host, f"[{i}]")) for i, host in enumerate(kill_nodes)]
     wait_tasks = [spawn(remote(host, "[C]")) for host in wait_nodes]
 
-    if not CI:
-        await sleep(2)
-    else:
-        await sleep(10)
+    await sleep(2)
     p = await proc("cargo", "run", "--quiet", "--package", "run", "--", "liftoff")
     await p.wait()
 

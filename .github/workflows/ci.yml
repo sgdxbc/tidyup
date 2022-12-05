@@ -12,6 +12,7 @@ jobs:
             experimental: true
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental }}
+    container: catthehacker/ubuntu:act-latest
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
