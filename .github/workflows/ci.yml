@@ -1,0 +1,24 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build_and_test:
+    name: Build & Test
+    strategy:
+      matrix:
+        include:
+          - rust: stable
+            experimental: false
+          - rust: beta
+            experimental: true
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          profile: minimal
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --release --lib
